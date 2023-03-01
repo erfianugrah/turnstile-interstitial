@@ -43,8 +43,8 @@ export default {
         let newRes = await fetch(request)
         if (returnHTML(request).method === 'POST')
             return await handlePost(request) 
-            else {
-                return newRes
-            }
+            // else {
+            //     return newRes
+            // }
     }, 
 };
