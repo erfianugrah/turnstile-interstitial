@@ -32,12 +32,9 @@ async function handlePost(request) {
 
 export default {
     async fetch(request) {
-        if (request.method === 'POST') {
+        if (request.method === 'GET') {
             return await handlePost(request);
         }
-
-        const url = new URL(request.url);
-        let body = implicitRenderHtml;
 
         return new Response(body, {
             headers: {
