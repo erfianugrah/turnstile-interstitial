@@ -12,6 +12,7 @@ async function handlePost(request) {
     // Validate the token by calling the "/siteverify" API.
     let formData = new FormData();
     formData.append('secret', secret_key);
+    console.log(secret_key)
     formData.append('response', token);
     formData.append('remoteip', ip);
 
