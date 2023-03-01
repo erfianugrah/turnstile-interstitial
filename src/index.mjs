@@ -4,6 +4,7 @@ import implicitRenderHtml from './implicit.html';
 // your secret key(s) safely.
 
 async function handlePost(request) {
+    let res = await fetch(request)
     const body = await request.formData();
     // Turnstile injects a token in "cf-turnstile-response".
     const token = body.get('cf-turnstile-response');
@@ -12,7 +13,6 @@ async function handlePost(request) {
     // Validate the token by calling the "/siteverify" API.
     let formData = new FormData();
     formData.append('secret', secret_key);
-    console.log(secret_key)
     formData.append('response', token);
     formData.append('remoteip', ip);
 
@@ -22,21 +22,20 @@ async function handlePost(request) {
     });
 
     const outcome = await result.json();
-    if (!outcome.success) {
-        return new Response('The provided Turnstile token was not valid! \n' + JSON.stringify(outcome));
+    if (outcome.success) {
+        return new Response('The provided Turnstile token was not valid! \n' + JSON.stringify(outcome), { status: 403 });
     }
     // The Turnstile token was successfuly validated. Proceed with your application logic.
     // Validate login, redirect user, etc.
     // For this demo, we just echo the "/siteverify" response:
-    return await fetch(request);
+    return res
 }
 
 export default {
     async fetch(request) {
         if (request.method === 'POST') {
             return await handlePost(request);
-        }
-
+        } 
         let body = implicitRenderHtml;
 
         return new Response(body, {
