@@ -19,7 +19,7 @@ async function handlePost(request) {
     });
 
     const outcome = await result.json();
-    if (outcome.success) {
+    if (!outcome.success) {
         return new Response('The provided Turnstile token was not valid! \n' + JSON.stringify(outcome), { status: 403 });
     }
 
@@ -31,6 +31,7 @@ export default {
         if (request.method === 'POST') {
             return await handlePost(request);
         } 
+
         let body = implicitRenderHtml;
 
         return new Response(body, {
