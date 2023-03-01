@@ -2,7 +2,6 @@ import implicitRenderHtml from './implicit.html';
 
 // This is the demo secret key. In prod, we recommend you store
 // your secret key(s) safely.
-const SECRET_KEY = env.secret_key
 
 async function handlePost(request) {
     const body = await request.formData();
@@ -12,7 +11,7 @@ async function handlePost(request) {
 
     // Validate the token by calling the "/siteverify" API.
     let formData = new FormData();
-    formData.append('secret', SECRET_KEY);
+    formData.append('secret', secret_key);
     formData.append('response', token);
     formData.append('remoteip', ip);
 
