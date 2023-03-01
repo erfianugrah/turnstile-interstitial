@@ -36,6 +36,8 @@ export default {
             return await handlePost(request);
         }
 
+        let body = implicitRenderHtml;
+        
         return new Response(body, {
             headers: {
                 'Content-Type': 'text/html',
