@@ -28,16 +28,15 @@ async function handlePost(request) {
 
 export default {
     async fetch(request) {
+        let body = implicitRenderHtml
+        let newResponse = await fetch(request)
+
         if (request.method === 'POST') {
             return await handlePost(request);
         } 
 
-        let body = implicitRenderHtml;
+        let response = new Response(body, newResponse.body, newResponse)
 
-        return new Response(body, {
-            headers: {
-                'Content-Type': 'text/html',
-            },
-        });
+        return response
     },
 };
