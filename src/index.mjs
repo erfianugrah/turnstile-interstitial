@@ -32,12 +32,12 @@ async function handlePost(request) {
 
 export default {
     async fetch(request) {
-        if (request.method === 'GET') {
+        if (request.method === 'POST') {
             return await handlePost(request);
         }
 
         let body = implicitRenderHtml;
-        
+
         return new Response(body, {
             headers: {
                 'Content-Type': 'text/html',
