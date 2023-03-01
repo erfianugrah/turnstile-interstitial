@@ -32,13 +32,13 @@ export default {
         let body = implicitRenderHtml
         let newResponse = await fetch(request)
 
+        if (request.method === 'POST') {
+            return await handlePost(request);
+        }
+
         let response = new Response(body, newResponse.body, newResponse)
         response.headers.set("cf-edge-cache", "no-cache")
         response.headers.set("content-type", "text/html;charset=UTF-8")
-
-        if (response.method === 'POST') {
-            return await handlePost(request);
-        }
 
         return response
     },
