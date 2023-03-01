@@ -1,0 +1,13 @@
+name = "turnstile-interstitial"
+main = "src/index.mjs"
+compatibility_date = "2023-02-28"
+
+[env.staging]
+name = "staging-turnstile-interstitial"
+vars = { ENVIRONMENT = "staging" }
+workers_dev = true
+
+[env.prod]
+name = "prod-turnstile-interstitial"
+vars = { ENVIRONMENT = "production" }
+route = { pattern = "erfianugrah.com/ghost/*", custom_domain = false, zone_id = "3f2c4daa43d5920f313654a873b31d06" }
