@@ -25,9 +25,7 @@ async function handlePost(request) {
     if (outcome.success) {
         return new Response('The provided Turnstile token was not valid! \n' + JSON.stringify(outcome), { status: 403 });
     }
-    // The Turnstile token was successfuly validated. Proceed with your application logic.
-    // Validate login, redirect user, etc.
-    // For this demo, we just echo the "/siteverify" response:
+
     return res
 }
 
