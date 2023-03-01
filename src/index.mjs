@@ -1,8 +1,5 @@
 import implicitRenderHtml from './implicit.html';
 
-// This is the demo secret key. In prod, we recommend you store
-// your secret key(s) safely.
-
 async function handlePost(request) {
     let res = await fetch(request)
     const body = await request.formData();
