@@ -27,24 +27,19 @@ async function handlePost(request) {
     return res
 }
 
-async function returnHTML(request) {
+export default {
+    async fetch(request) {
     let body = implicitRenderHtml
     let newResponse = await fetch(request)
-
+    
+    if (request.method === 'POST') {
+        return await handlePost(request);
+        }
+        
     let response = new Response(body, newResponse.body, newResponse)
     response.headers.set("cf-edge-cache", "no-cache")
     response.headers.set("content-type", "text/html;charset=UTF-8")
 
     return response
-}
-
-export default {
-    async fetch(request) {
-        let newRes = await fetch(request)
-        if (returnHTML(request).method === 'POST')
-            return await handlePost(request) 
-            // else {
-            //     return newRes
-            // }
     }, 
 };
