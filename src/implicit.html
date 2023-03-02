@@ -22,7 +22,7 @@
 
         .container {
             width: 80%;
-            background-color: #bfbebc;
+            background-color: #dedede;
             padding: 20px;
             border-radius: 10px;
             text-align: center;
@@ -37,25 +37,12 @@
         h1 {
             font-size: 36px;
             margin-bottom: 30px;
+            color: #17274D;
         }
 
         p {
             font-size: 24px;
             margin-bottom: 30px;
-        }
-
-        button {
-            background-color: #0099ff;
-            color: #fff;
-            font-size: 20px;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background-color: #0077cc;
         }
     </style>
 </head>
@@ -64,7 +51,9 @@
     <div class="container">
         <h1>We gotta check you</h1>
         <p>Let's see if you are legit and can solve this challenge</p>
-        <div class="cf-turnstile" data-sitekey="0x4AAAAAAAAu6bb2xa_UwoUN" data-theme="light"></div>
+        <form id="turnstile-form" method="POST" action="/handler">
+                <div class="cf-turnstile" data-sitekey="0x4AAAAAAAAu6bb2xa_UwoUN" data-theme="light"></div>
+        </form>
     </div>
 </body>
 

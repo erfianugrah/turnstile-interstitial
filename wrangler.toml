@@ -10,4 +10,4 @@ workers_dev = true
 [env.prod]
 name = "prod-turnstile-interstitial"
 vars = { ENVIRONMENT = "production" }
-route = { pattern = "erfianugrah.com/ghost/*", custom_domain = false, zone_id = "3f2c4daa43d5920f313654a873b31d06" }
+route = { pattern = "erfianugrah.com/ghost/api/admin/session", custom_domain = false, zone_id = "3f2c4daa43d5920f313654a873b31d06" }
