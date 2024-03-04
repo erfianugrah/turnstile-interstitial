@@ -28,6 +28,30 @@ export class ChallengeStatusStorage {
   }
 }
 
+export class CredentialsStorage {
+  constructor(state, env) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const key = await generateEncryptionKey(); // Generate a new key for each operation
+
+    if (url.pathname === "/store") {
+      const details = await request.json();
+      const { encryptedData, iv } = await encryptData(key, JSON.stringify(details));
+      await this.state.storage.put("encryptedCredentials", JSON.stringify({ encryptedData: Array.from(new Uint8Array(encryptedData)), iv: Array.from(iv) }));
+      return new Response("Credentials stored", { status: 200 });
+    } else if (url.pathname === "/retrieve") {
+      const { encryptedData, iv } = JSON.parse(await this.state.storage.get("encryptedCredentials"));
+      const decryptedData = await decryptData(key, new Uint8Array(encryptedData), new Uint8Array(iv));
+      await this.state.storage.delete("encryptedCredentials");
+      return new Response(decryptedData, { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -55,7 +79,39 @@ export default {
           }
         }
       }
+
       return serveChallengePage(env, request);
+    }
+
+    // Intercept POST requests to /login for login attempts with JSON payloads
+    if (url.pathname === "/api/login" && request.method === "POST") {
+      // Check if the challenge has already been passed using cf_clearance or other logic
+      if (cfClearanceValue) {
+        // Logic to verify cf_clearance and proceed with the request if valid
+      } else {
+        // Extract the body and headers of the request
+        const requestBody = await request.json();
+        const requestHeaders = {};
+        for (const [key, value] of request.headers) {
+          if (!["host", "cookie", "content-length"].includes(key.toLowerCase())) {
+            requestHeaders[key] = value;
+          }
+        }
+
+        // Generate a unique ID for this login attempt
+        const loginAttemptId = crypto.randomUUID();
+
+        // Store the login attempt details in a Durable Object
+        const storageId = env.CREDENTIALS_STORAGE.idFromName(loginAttemptId);
+        const storage = env.CREDENTIALS_STORAGE.get(storageId);
+        await storage.fetch("https://challengestorage.internal/store", {
+          method: "POST",
+          body: JSON.stringify({ body: requestBody, headers: requestHeaders, method: request.method, url: request.url })
+        });
+
+        // Serve the challenge page, passing the loginAttemptId to track this attempt
+        return serveChallengePage(env, request, loginAttemptId);
+      }
     }
 
     if (/^\/verify/.test(url.pathname) && request.method === "POST") {
@@ -69,11 +125,9 @@ export default {
       }
       return response;
     }
-
     return fetch(request);
   }
 };
-
 
 async function hashValue(value) {
   const encoder = new TextEncoder();
@@ -84,11 +138,52 @@ async function hashValue(value) {
   return hashHex;
 }
 
+async function generateEncryptionKey() {
+  const key = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"]
+  );
+  return key;
+}
+
+async function encryptData(key, data) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // AES-GCM requires a 12-byte IV
+  const encoder = new TextEncoder();
+  const encodedData = encoder.encode(data);
+
+  const encryptedData = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv,
+    },
+    key,
+    encodedData
+  );
+
+  return { encryptedData, iv };
+}
+
+async function decryptData(key, encryptedData, iv) {
+  const decryptedData = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: iv,
+    },
+    key,
+    encryptedData
+  );
+
+  const decoder = new TextDecoder();
+  return decoder.decode(decryptedData);
+}
+
 async function verifyChallenge(request, env) {
   const body = await request.formData();
   const token = body.get('cf-turnstile-response');
   const ip = request.headers.get('CF-Connecting-IP');
   const originalUrl = body.get('originalUrl')
+
   // Validate the token by calling the "/siteverify" API.
   let formData = new FormData();
   formData.append('secret', env.SECRET_KEY);
@@ -107,7 +202,6 @@ async function verifyChallenge(request, env) {
     // Handle verification failure
     return new Response('The provided Turnstile token was not valid!', { status: 401 });
   }
-
 
   // Redirect the user to the decoded original URL upon successful verification
   return Response.redirect(originalUrl, 302);
