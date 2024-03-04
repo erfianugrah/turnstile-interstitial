@@ -1,20 +1,13 @@
-{
-	"data": "name = \"turnstile-interstitial\"\nmain = \"src/index.mjs\"\ncompatibility_date = \"2023-02-18\"\naccount_id = \"25f21f141824546aa72c74451a11b419\"\nroute = { pattern = \"file.erfianugrah.com/*\", custom_domain = false, zone_id = \"3f2c4daa43d5920f313654a873b31d06\" }\n\ndurable_objects.bindings = [\n    { name = \"CHALLENGE_STATUS\", class_name = \"ChallengeStatusStorage\" },\n]\n\n[[migrations]]\ntag = \"v1\"                               # Should be unique for each entry\nnew_classes = [\"ChallengeStatusStorage\"]",
-	"sops": {
-		"kms": null,
-		"gcp_kms": null,
-		"azure_kv": null,
-		"hc_vault": null,
-		"age": [
-			{
-				"recipient": "age15jdwjecd05un3cclyxdhh32zm8xsrt4uv5fk73tjq70d8che43xqsk8sa9",
-				"enc": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBlUEhmRm1WMHN3ZytwOVcy\nd0owVlVjNVNkakpVbkd3Y2MxckJNSWpKV1FVCnY0YmdzeEVBTC9URkJjMko2SHAv\nMzFPUE5CWTBHL1FIaFIwRFVXRXZlK0UKLS0tIHN5WWIvdHRSZ0xyWnhCT01DMytX\nVWNRNTRMbTNvN2VBYjZjOW00MmJHTnMKzfPG4uufXWeVGEwX0pmG/RDdWLqgncpb\nS2HGCwK0aMTozeRj4GVoiAJO+dVr/VXgMn+lGHNHRZDV2nqF9oCtiA==\n-----END AGE ENCRYPTED FILE-----\n"
-			}
-		],
-		"lastmodified": "2024-03-04T08:36:18Z",
-		"mac": "ENC[AES256_GCM,data:M9pZqQQYE6gc9qjgS4u79FLazj2m6E19hCOJfsNjJTCins3Rx1W9p2vfAx85Gmn385iUYb7mlsHlpz+nYMCUNDTxRHY288JGvF1tT5a1O6cKsBUoy1sNaSOrl8sC4TE1+bKRs8fFUVApvB59MEVdGCaoHMFq9MmsXSkbnHiHuyo=,iv:XeShtLFbAV2bkh9TDC+ldjsczewXuxTM84qMAV2tI+o=,tag:D/lKMuBrDkjeUXhadWBb/A==,type:str]",
-		"pgp": null,
-		"encrypted_regex": "^(route|account_id|zone_id)$",
-		"version": "3.8.1"
-	}
-}
+name = "turnstile-interstitial"
+main = "src/index.mjs"
+compatibility_date = "2023-02-18"
+account_id = "25f21f141824546aa72c74451a11b419"
+route = { pattern = "file.erfianugrah.com/*", custom_domain = false, zone_id = "3f2c4daa43d5920f313654a873b31d06" }
+
+durable_objects.bindings = [
+    { name = "CHALLENGE_STATUS", class_name = "ChallengeStatusStorage" },
+]
+
+[[migrations]]
+tag = "v1"                               # Should be unique for each entry
+new_classes = ["ChallengeStatusStorage"]
