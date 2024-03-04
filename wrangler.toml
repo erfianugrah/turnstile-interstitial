@@ -1,0 +1,14 @@
+name = "turnstile-interstitial"
+main = "src/index.mjs"
+compatibility_date = "2023-02-18"
+account_id = "ACCOUNT_ID"
+route = { pattern = "ROUTE", custom_domain = false, zone_id = "ZONE_ID" }
+
+durable_objects.bindings = [
+    { name = "CHALLENGE_STATUS", class_name = "ChallengeStatusStorage" },
+]
+
+[[migrations]]
+tag = "v1"                               # Should be unique for each entry
+new_classes = ["ChallengeStatusStorage"]
+
