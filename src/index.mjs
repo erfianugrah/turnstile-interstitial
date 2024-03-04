@@ -55,79 +55,181 @@ export class CredentialsStorage {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const cookies = request.headers.get('Cookie');
-    let cfClearanceValue;
+    const cfClearanceValue = getCfClearanceValue(request);
 
-    if (cookies) {
-      const matches = cookies.match(/cf_clearance=([^;]+)/);
-      if (matches) {
-        cfClearanceValue = matches[1];
-      }
-    }
-
-    if (/^\/login/.test(url.pathname) && request.method === "GET") {
-      if (cfClearanceValue) {
-        const hashedCfClearanceValue = await hashValue(cfClearanceValue);
-        const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
-        const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
-
-        const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
-        if (dataResponse.ok) {
-          const data = await dataResponse.json();
-          if (data.timestamp && (Date.now() - parseInt(data.timestamp, 10)) < 150000 && data.ip === request.headers.get('CF-Connecting-IP')) {
-            return fetch(request);
-          }
-        }
-      }
-
-      return serveChallengePage(env, request);
-    }
-
-    // Intercept POST requests to /login for login attempts with JSON payloads
-    if (url.pathname === "/api/login" && request.method === "POST") {
-      // Check if the challenge has already been passed using cf_clearance or other logic
-      if (cfClearanceValue) {
-        // Logic to verify cf_clearance and proceed with the request if valid
-      } else {
-        // Extract the body and headers of the request
-        const requestBody = await request.json();
-        const requestHeaders = {};
-        for (const [key, value] of request.headers) {
-          if (!["host", "cookie", "content-length"].includes(key.toLowerCase())) {
-            requestHeaders[key] = value;
-          }
-        }
-
-        // Generate a unique ID for this login attempt
-        const loginAttemptId = crypto.randomUUID();
-
-        // Store the login attempt details in a Durable Object
-        const storageId = env.CREDENTIALS_STORAGE.idFromName(loginAttemptId);
-        const storage = env.CREDENTIALS_STORAGE.get(storageId);
-        await storage.fetch("https://challengestorage.internal/store", {
-          method: "POST",
-          body: JSON.stringify({ body: requestBody, headers: requestHeaders, method: request.method, url: request.url })
-        });
-
-        // Serve the challenge page, passing the loginAttemptId to track this attempt
-        return serveChallengePage(env, request, loginAttemptId);
-      }
+    if (/^\/login/.test(url.pathname)) {
+      return handleLoginRequest(request, env, cfClearanceValue);
     }
 
     if (/^\/verify/.test(url.pathname) && request.method === "POST") {
-      const response = await verifyChallenge(request, env);
-      if (response.status === 302 && cfClearanceValue) {
-        const hashedCfClearanceValue = await hashValue(cfClearanceValue);
-        const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
-        const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
-
-        await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') } }));
-      }
-      return response;
+      return handleVerifyRequest(request, env, cfClearanceValue);
     }
+
     return fetch(request);
   }
 };
+
+async function getCfClearanceValue(request) {
+  const cookies = request.headers.get('Cookie');
+  const matches = cookies?.match(/cf_clearance=([^;]+)/);
+  return matches ? matches[1] : null;
+}
+
+async function handleLoginRequest(request, env, cfClearanceValue) {
+  const url = new URL(request.url);
+
+  if (request.method === "GET") {
+    return handleGetLogin(request, env, cfClearanceValue);
+  } else if (url.pathname === "/api/login" && request.method === "POST") {
+    return handlePostLogin(request, env, cfClearanceValue);
+  }
+}
+
+async function handleGetLogin(request, env, cfClearanceValue) {
+  const isVerified = await verifyChallengeStatus(request, env, cfClearanceValue);
+  if (isVerified) {
+    return fetch(request);
+  }
+  return serveChallengePage(env, request);
+}
+
+
+async function handlePostLogin(request, env, cfClearanceValue) {
+  const isVerified = await verifyChallengeStatus(request, env, cfClearanceValue);
+  if (!isVerified) {
+    return serveChallengePage(env, request);
+  }
+
+  // Proceed with storing the login attempt details since the challenge is verified
+  const requestBody = await request.json();
+  const requestHeaders = Object.fromEntries([...request.headers].filter(([key]) => !["host", "cookie", "content-length"].includes(key.toLowerCase())));
+  const loginAttemptId = crypto.randomUUID();
+
+  const storage = env.CREDENTIALS_STORAGE.get(env.CREDENTIALS_STORAGE.idFromName(loginAttemptId));
+  await storage.fetch("https://challengestorage.internal/store", {
+    method: "POST",
+    body: JSON.stringify({ body: requestBody, headers: requestHeaders, method: request.method, url: request.url })
+  });
+
+  // Optionally, you might want to redirect the user or take another action after storing the details
+  return new Response("Login attempt stored. Please complete the challenge if required.", { status: 200 });
+}
+
+
+async function handleVerifyRequest(request, env, cfClearanceValue) {
+  const response = await verifyChallenge(request, env);
+  if (response.status === 302 && cfClearanceValue) {
+    const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
+    await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') } }));
+  }
+  return response;
+}
+
+async function getChallengeStatusStorage(env, cfClearanceValue) {
+  const hashedCfClearanceValue = await hashValue(cfClearanceValue);
+  const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
+  return env.CHALLENGE_STATUS.get(challengeStatusStorageId);
+}
+
+async function verifyChallengeStatus(request, env, cfClearanceValue) {
+  if (!cfClearanceValue) {
+    // If cf_clearance cookie is not present, challenge verification fails
+    return false;
+  }
+
+  const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
+  const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
+  if (!dataResponse.ok) {
+    // If unable to retrieve challenge status, challenge verification fails
+    return false;
+  }
+
+  const data = await dataResponse.json();
+  if (data.timestamp && (Date.now() - parseInt(data.timestamp, 10)) < 150000 && data.ip === request.headers.get('CF-Connecting-IP')) {
+    // Challenge verification succeeded
+    return true;
+  }
+
+  // Challenge verification failed
+  return false;
+}
+
+// export default {
+//   async fetch(request, env, ctx) {
+//     const url = new URL(request.url);
+//     const cookies = request.headers.get('Cookie');
+//     let cfClearanceValue;
+
+//     if (cookies) {
+//       const matches = cookies.match(/cf_clearance=([^;]+)/);
+//       if (matches) {
+//         cfClearanceValue = matches[1];
+//       }
+//     }
+
+//     if (/^\/login/.test(url.pathname) && request.method === "GET") {
+//       if (cfClearanceValue) {
+//         const hashedCfClearanceValue = await hashValue(cfClearanceValue);
+//         const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
+//         const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
+
+//         const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
+//         if (dataResponse.ok) {
+//           const data = await dataResponse.json();
+//           if (data.timestamp && (Date.now() - parseInt(data.timestamp, 10)) < 150000 && data.ip === request.headers.get('CF-Connecting-IP')) {
+//             return fetch(request);
+//           }
+//         }
+//       }
+
+//       return serveChallengePage(env, request);
+//     }
+
+//     // Intercept POST requests to /login for login attempts with JSON payloads
+//     if (url.pathname === "/api/login" && request.method === "POST") {
+//       // Check if the challenge has already been passed using cf_clearance or other logic
+//       if (cfClearanceValue) {
+//         // Logic to verify cf_clearance and proceed with the request if valid
+//       } else {
+//         // Extract the body and headers of the request
+//         const requestBody = await request.json();
+//         const requestHeaders = {};
+//         for (const [key, value] of request.headers) {
+//           if (!["host", "cookie", "content-length"].includes(key.toLowerCase())) {
+//             requestHeaders[key] = value;
+//           }
+//         }
+
+//         // Generate a unique ID for this login attempt
+//         const loginAttemptId = crypto.randomUUID();
+
+//         // Store the login attempt details in a Durable Object
+//         const storageId = env.CREDENTIALS_STORAGE.idFromName(loginAttemptId);
+//         const storage = env.CREDENTIALS_STORAGE.get(storageId);
+//         await storage.fetch("https://challengestorage.internal/store", {
+//           method: "POST",
+//           body: JSON.stringify({ body: requestBody, headers: requestHeaders, method: request.method, url: request.url })
+//         });
+
+//         // Serve the challenge page, passing the loginAttemptId to track this attempt
+//         return serveChallengePage(env, request, loginAttemptId);
+//       }
+//     }
+
+//     if (/^\/verify/.test(url.pathname) && request.method === "POST") {
+//       const response = await verifyChallenge(request, env);
+//       if (response.status === 302 && cfClearanceValue) {
+//         const hashedCfClearanceValue = await hashValue(cfClearanceValue);
+//         const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
+//         const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
+
+//         await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') } }));
+//       }
+//       return response;
+//     }
+//     return fetch(request);
+//   }
+// };
 
 async function hashValue(value) {
   const encoder = new TextEncoder();
