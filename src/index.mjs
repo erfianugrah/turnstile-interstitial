@@ -5,25 +5,27 @@ export class ChallengeStatusStorage {
 
   async fetch(request) {
     const url = new URL(request.url);
+    const clientIP = request.headers.get('CF-Connecting-IP'); // Get the client's IP address
 
     // Handle requests based on the path
     switch (url.pathname) {
-      case "/getTimestamp":
-        // Retrieve the timestamp from Durable Object storage
-        const timestamp = await this.state.storage.get("timestamp");
-        return new Response(timestamp ? timestamp.toString() : "No timestamp set");
+      case "/getTimestampAndIP":
+        // Retrieve the timestamp and IP from Durable Object storage
+        const data = await this.state.storage.get("timestampAndIP");
+        return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
 
-      case "/storeTimestamp":
-        // Store the current timestamp in Durable Object storage
-        await this.state.storage.put("timestamp", Date.now());
-        return new Response("Timestamp stored");
+      case "/storeTimestampAndIP":
+        // Store the current timestamp and the client's IP in Durable Object storage
+        const timestampAndIP = { timestamp: Date.now(), ip: clientIP };
+        await this.state.storage.put("timestampAndIP", timestampAndIP);
+        return new Response("Timestamp and IP stored");
 
       default:
         return new Response("Not found", { status: 404 });
     }
   }
-
 }
+
 
 export default {
   async fetch(request, env, ctx) {
@@ -41,16 +43,15 @@ export default {
 
     if (/^\/login/.test(url.pathname) && request.method === "GET") {
       if (cfClearanceValue) {
-        // Hash the cf_clearance value before using it as an ID
         const hashedCfClearanceValue = await hashValue(cfClearanceValue);
         const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
         const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
 
-        // Corrected interaction with the Durable Object
-        const timestampResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestamp"));
-        const timestamp = await timestampResponse.text();
+        // Adjusted interaction with the Durable Object to get timestamp and IP
+        const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
+        const data = await dataResponse.json();
 
-        if (timestamp && (Date.now() - parseInt(timestamp, 10)) < 150000) {
+        if (data.timestamp && (Date.now() - parseInt(data.timestamp, 10)) < 150000 && data.ip === request.headers.get('CF-Connecting-IP')) {
           return fetch(request);
         }
       }
@@ -61,13 +62,12 @@ export default {
     if (/^\/verify/.test(url.pathname) && request.method === "POST") {
       const response = await verifyChallenge(request, env);
       if (response.status === 302 && cfClearanceValue) {
-        // Hash the cf_clearance value before using it as an ID
         const hashedCfClearanceValue = await hashValue(cfClearanceValue);
         const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
         const challengeStatusStorage = env.CHALLENGE_STATUS.get(challengeStatusStorageId);
 
-        // Corrected interaction to store the timestamp
-        await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestamp"));
+        // Adjusted interaction to store the timestamp and IP
+        await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') } }));
       }
       return response;
     }
@@ -75,6 +75,7 @@ export default {
     return fetch(request);
   }
 };
+
 
 async function hashValue(value) {
   const encoder = new TextEncoder();
