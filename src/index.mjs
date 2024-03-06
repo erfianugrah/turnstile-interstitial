@@ -1,4 +1,4 @@
-// Assume hashValue, serveChallengePage, and verifyChallenge functions are defined as before
+import { hashValue, generateEncryptionKey, encryptData, decryptData } from './utils.js'
 
 export class ChallengeStatusStorage {
   constructor(state, env) {
@@ -55,7 +55,8 @@ export class CredentialsStorage {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const cfClearanceValue = getCfClearanceValue(request);
+    // Correctly await the asynchronous call to getCfClearanceValue
+    const cfClearanceValue = await getCfClearanceValue(request);
 
     if (/^\/login/.test(url.pathname)) {
       return handleLoginRequest(request, env, cfClearanceValue);
@@ -68,6 +69,7 @@ export default {
     return fetch(request);
   }
 };
+
 
 async function getCfClearanceValue(request) {
   const cookies = request.headers.get('Cookie');
@@ -154,54 +156,6 @@ async function verifyChallengeStatus(request, env, cfClearanceValue) {
   return false;
 }
 
-async function hashValue(value) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(value);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  return hashHex;
-}
-
-async function generateEncryptionKey() {
-  const key = await crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"]
-  );
-  return key;
-}
-
-async function encryptData(key, data) {
-  const iv = crypto.getRandomValues(new Uint8Array(12)); // AES-GCM requires a 12-byte IV
-  const encoder = new TextEncoder();
-  const encodedData = encoder.encode(data);
-
-  const encryptedData = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: iv,
-    },
-    key,
-    encodedData
-  );
-
-  return { encryptedData, iv };
-}
-
-async function decryptData(key, encryptedData, iv) {
-  const decryptedData = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: iv,
-    },
-    key,
-    encryptedData
-  );
-
-  const decoder = new TextDecoder();
-  return decoder.decode(decryptedData);
-}
 
 async function verifyChallenge(request, env) {
   const body = await request.formData();
