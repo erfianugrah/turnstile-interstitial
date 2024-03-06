@@ -1,5 +1,5 @@
 import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue} from './utils.js'
-import {serveRateLimitPage, serveChallengePage } from './staticpages.js'
+import { serveRateLimitPage, serveChallengePage } from './staticpages.js'
 
 export class ChallengeStatusStorage {
   constructor(state, env) {
@@ -118,13 +118,6 @@ export default {
     return fetch(request);
   }
 };
-
-
-async function getCfClearanceValue(request) {
-  const cookies = request.headers.get('Cookie');
-  const matches = cookies?.match(/cf_clearance=([^;]+)/);
-  return matches ? matches[1] : null;
-}
 
 async function handleLoginRequest(request, env) {
   const url = new URL(request.url);
