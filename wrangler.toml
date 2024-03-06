@@ -17,3 +17,11 @@ new_classes = ["ChallengeStatusStorage"]
 [[migrations]]
 tag = "v2"                               # Should be unique for each entry
 new_classes = ["CredentialsStorage"]
+
+[[migrations]]
+tag = "v3"                               # Should be unique for each entry
+deleted_classes = ["RateLimiter"]
+
+[[migrations]]
+tag = "remove_rate_limiter"                               # Should be unique for each entry
+deleted_classes = ["RateLimiter"]
