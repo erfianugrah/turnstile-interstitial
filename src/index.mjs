@@ -22,6 +22,11 @@ export class ChallengeStatusStorage {
         await this.state.storage.put("timestampAndIP", timestampAndIP);
         return new Response("Timestamp and IP stored");
 
+      case "/deleteTimestampAndIP":
+        // Logic to delete the stored timestamp and IP
+        await this.state.storage.delete("timestampAndIP");
+        return new Response("Timestamp and IP deleted", { status: 200 });
+
       default:
         return new Response("Not found", { status: 404 });
     }
@@ -129,7 +134,9 @@ async function handleVerifyRequest(request, env, cfClearanceValue) {
 
 async function getChallengeStatusStorage(env, cfClearanceValue) {
   const hashedCfClearanceValue = await hashValue(cfClearanceValue);
+  console.log(hashedCfClearanceValue)
   const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
+  console.log(challengeStatusStorageId)
   return env.CHALLENGE_STATUS.get(challengeStatusStorageId);
 }
 
@@ -141,20 +148,28 @@ async function verifyChallengeStatus(request, env, cfClearanceValue) {
 
   const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
   const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
+  
   if (!dataResponse.ok) {
     // If unable to retrieve challenge status, challenge verification fails
     return false;
   }
 
   const data = await dataResponse.json();
-  if (data.timestamp && (Date.now() - parseInt(data.timestamp, 10)) < 150000 && data.ip === request.headers.get('CF-Connecting-IP')) {
+  const currentTime = Date.now();
+  const timeDifference = currentTime - parseInt(data.timestamp, 10);
+  const isTimestampValid = timeDifference < 150000; // 2.5 minutes
+  const isIPMatching = data.ip === request.headers.get('CF-Connecting-IP');
+
+  if (isTimestampValid && isIPMatching) {
     // Challenge verification succeeded
     return true;
+  } else {
+    // Challenge verification failed, delete the old value
+    await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/deleteTimestampAndIP"), { method: "POST" });
+    return false;
   }
-
-  // Challenge verification failed
-  return false;
 }
+
 
 
 async function verifyChallenge(request, env) {
