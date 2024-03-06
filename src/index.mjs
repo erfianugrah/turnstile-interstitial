@@ -1,4 +1,4 @@
-import { hashValue, generateEncryptionKey, encryptData, decryptData } from './utils.js'
+import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue } from './utils.js'
 
 export class ChallengeStatusStorage {
   constructor(state, env) {
@@ -41,7 +41,7 @@ export class ChallengeStatusStorage {
 
   async checkRateLimit(request) {
     const clientIP = request.headers.get('CF-Connecting-IP');
-    const cfClearanceMatch = request.headers.get('Cookie')?.match(/cf_clearance=([^;]+)/);
+    const cfClearanceMatch = await getCfClearanceValue(request);
     if (!cfClearanceMatch) {
       return new Response("cf_clearance cookie is missing", { status: 400 });
     }
