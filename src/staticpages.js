@@ -1,15 +1,15 @@
 export async function serveChallengePage(env, request) {
-  const url = new URL(request.url);
-  const acceptHeader = request.headers.get('Accept');
+    const url = new URL(request.url);
+    const acceptHeader = request.headers.get('Accept');
 
-  // Check if the request prefers HTML
-  if (!acceptHeader || !acceptHeader.includes('text/html')) {
-    // Respond with JSON for non-browser clients
-    return new Response(JSON.stringify({ message: "Please complete the challenge to proceed." }), {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
-    });
-  }
-  const interstitialPageContent = `
+    // Check if the request prefers HTML
+    if (!acceptHeader || !acceptHeader.includes('text/html')) {
+        // Respond with JSON for non-browser clients
+        return new Response(JSON.stringify({ message: "Please complete the challenge to proceed." }), {
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
+        });
+    }
+    const interstitialPageContent = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -83,29 +83,29 @@ export async function serveChallengePage(env, request) {
     </html>
   `;
 
-  // Set headers to prevent caching
-  const headers = new Headers({
-    'Content-Type': 'text/html',
-    'Cache-Control': 'no-store, max-age=0'
-  });
+    // Set headers to prevent caching
+    const headers = new Headers({
+        'Content-Type': 'text/html',
+        'Cache-Control': 'no-store, max-age=0'
+    });
 
-  return new Response(interstitialPageContent, { headers: headers });
+    return new Response(interstitialPageContent, { headers: headers });
 }
 
 export async function serveRateLimitPage(cooldownEndTime, request) {
-  // Assuming cooldownEndTime is a Date object
-  const cooldownEndTimeString = cooldownEndTime.toLocaleTimeString();
-  const acceptHeader = request.headers.get('Accept');
+    // Assuming cooldownEndTime is a Date object
+    const cooldownEndTimeString = cooldownEndTime.toLocaleTimeString();
+    const acceptHeader = request.headers.get('Accept');
 
-  // Check if the request prefers HTML
-  if (!acceptHeader || !acceptHeader.includes('text/html')) {
-    // Respond with JSON for non-browser clients
-    return new Response(JSON.stringify({ message: "Rate limit exceeded. Please wait until the cooldown period has passed before making another request.", cooldownEndsAt: cooldownEndTimeString }), {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
-    });
-  }
+    // Check if the request prefers HTML
+    if (!acceptHeader || !acceptHeader.includes('text/html')) {
+        // Respond with JSON for non-browser clients
+        return new Response(JSON.stringify({ message: "Rate limit exceeded. Please wait until the cooldown period has passed before making another request.", cooldownEndsAt: cooldownEndTimeString }), {
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
+        });
+    }
 
-  const rateLimitPageContent = `
+    const rateLimitPageContent = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -191,11 +191,11 @@ export async function serveRateLimitPage(cooldownEndTime, request) {
     </html>
   `;
 
-  // Set headers to prevent caching
-  const headers = new Headers({
-    'Content-Type': 'text/html',
-    'Cache-Control': 'no-store, max-age=0'
-  });
+    // Set headers to prevent caching
+    const headers = new Headers({
+        'Content-Type': 'text/html',
+        'Cache-Control': 'no-store, max-age=0'
+    });
 
-  return new Response(rateLimitPageContent, { headers: headers });
+    return new Response(rateLimitPageContent, { headers: headers });
 }

@@ -48,7 +48,7 @@ export async function decryptData(key, encryptedData, iv) {
 }
 
 export async function getCfClearanceValue(request) {
-  const cookies = request.headers.get('Cookie');
-  const matches = cookies?.match(/cf_clearance=([^;]+)/);
-  return matches ? matches[1] : null;
+    const cookies = request.headers.get('Cookie');
+    const matches = cookies?.match(/cf_clearance=([^;]+)/);
+    return matches ? matches[1] : null;
 }

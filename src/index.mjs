@@ -1,4 +1,4 @@
-import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue} from './utils.js'
+import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue } from './utils.js'
 import { serveRateLimitPage, serveChallengePage } from './staticpages.js'
 
 export class ChallengeStatusStorage {
@@ -75,7 +75,6 @@ export class ChallengeStatusStorage {
   }
 
 }
-
 
 export class CredentialsStorage {
   constructor(state, env) {
@@ -157,7 +156,6 @@ async function handleLoginRequest(request, env) {
   }
 }
 
-
 async function handleGetLogin(request, env, cfClearanceValue) {
   const isVerified = await verifyChallengeStatus(request, env, cfClearanceValue);
   if (isVerified) {
@@ -165,7 +163,6 @@ async function handleGetLogin(request, env, cfClearanceValue) {
   }
   return serveChallengePage(env, request);
 }
-
 
 async function handlePostLogin(request, env, cfClearanceValue) {
   const isVerified = await verifyChallengeStatus(request, env, cfClearanceValue);
@@ -253,8 +250,6 @@ async function checkRateLimit(env, clientIP, cfClearance) {
 
   return rateLimitCheck;
 }
-
-
 
 async function verifyChallenge(request, env) {
   const body = await request.formData();
