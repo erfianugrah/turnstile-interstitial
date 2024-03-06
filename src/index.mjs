@@ -64,10 +64,10 @@ export class ChallengeStatusStorage {
       await this.state.storage.put(identifier, JSON.stringify(rateLimitInfo));
       return new Response("Allowed", { status: 200 });
     } else {
-        // Calculate the cooldown end time based on the last refill time and refill rate
-        const cooldownEndTime = new Date(rateLimitInfo.lastRefill + this.rateLimit.refillTime).toISOString();
-        const body = JSON.stringify({ message: "Rate limit exceeded", cooldownEndTime });
-        return new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
+      // Calculate the cooldown end time based on the last refill time and refill rate
+      const cooldownEndTime = new Date(rateLimitInfo.lastRefill + this.rateLimit.refillTime).toISOString();
+      const body = JSON.stringify({ message: "Rate limit exceeded", cooldownEndTime });
+      return new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
     }
   }
 }
@@ -292,7 +292,15 @@ async function verifyChallenge(request, env) {
 
 async function serveChallengePage(env, request) {
   const url = new URL(request.url);
+  const acceptHeader = request.headers.get('Accept');
 
+  // Check if the request prefers HTML
+  if (!acceptHeader || !acceptHeader.includes('text/html')) {
+    // Respond with JSON for non-browser clients
+    return new Response(JSON.stringify({ message: "Please complete the challenge to proceed." }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
+    });
+  }
   const interstitialPageContent = `
     <!DOCTYPE html>
     <html lang="en">
@@ -379,7 +387,16 @@ async function serveChallengePage(env, request) {
 async function serveRateLimitPage(cooldownEndTime) {
   // Assuming cooldownEndTime is a Date object
   const cooldownEndTimeString = cooldownEndTime.toLocaleTimeString();
+  const acceptHeader = request.headers.get('Accept');
 
+  // Check if the request prefers HTML
+  if (!acceptHeader || !acceptHeader.includes('text/html')) {
+    // Respond with JSON for non-browser clients
+    return new Response(JSON.stringify({ message: "Rate limit exceeded. Please wait until the cooldown period has passed before making another request.", cooldownEndsAt: cooldownEndTimeString }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
+    });
+  }
+  
   const rateLimitPageContent = `
     <!DOCTYPE html>
     <html lang="en">
