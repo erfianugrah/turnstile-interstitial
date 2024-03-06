@@ -55,8 +55,10 @@ export class ChallengeStatusStorage {
       rateLimitInfo = JSON.parse(rateLimitInfo);
       const timeSinceLastRefill = Date.now() - rateLimitInfo.lastRefill;
       const tokensToAdd = Math.floor(timeSinceLastRefill / this.rateLimit.refillTime) * this.rateLimit.refillRate;
-      rateLimitInfo.tokens = Math.min(rateLimitInfo.tokens + tokensToAdd, this.rateLimit.maxTokens);
-      rateLimitInfo.lastRefill = Date.now();
+      if (tokensToAdd > 0) { // Only update lastRefill if tokens are actually added
+        rateLimitInfo.tokens = Math.min(rateLimitInfo.tokens + tokensToAdd, this.rateLimit.maxTokens);
+        rateLimitInfo.lastRefill = Date.now(); // Update lastRefill only here
+      }
     }
 
     if (rateLimitInfo.tokens > 0) {
@@ -70,6 +72,7 @@ export class ChallengeStatusStorage {
       return new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
     }
   }
+
 }
 
 
@@ -148,7 +151,7 @@ async function handleLoginRequest(request, env) {
       return serveChallengePage(env, request);
     } else {
       // If still within the cooldown period, serve the rate limit page
-      return serveRateLimitPage(cooldownEndTime);
+      return serveRateLimitPage(cooldownEndTime, request);
     }
   }
 
@@ -159,8 +162,6 @@ async function handleLoginRequest(request, env) {
     return handlePostLogin(request, env, cfClearance);
   }
 }
-
-
 
 
 async function handleGetLogin(request, env, cfClearanceValue) {
@@ -384,7 +385,7 @@ async function serveChallengePage(env, request) {
   return new Response(interstitialPageContent, { headers: headers });
 }
 
-async function serveRateLimitPage(cooldownEndTime) {
+async function serveRateLimitPage(cooldownEndTime, request) {
   // Assuming cooldownEndTime is a Date object
   const cooldownEndTimeString = cooldownEndTime.toLocaleTimeString();
   const acceptHeader = request.headers.get('Accept');
@@ -396,7 +397,7 @@ async function serveRateLimitPage(cooldownEndTime) {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store, max-age=0' }
     });
   }
-  
+
   const rateLimitPageContent = `
     <!DOCTYPE html>
     <html lang="en">
