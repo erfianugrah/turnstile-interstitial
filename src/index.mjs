@@ -176,8 +176,6 @@ async function verifyChallengeStatus(request, env, cfClearanceValue) {
 }
 
 
-
-
 async function verifyChallenge(request, env) {
   const body = await request.formData();
   const token = body.get('cf-turnstile-response');
