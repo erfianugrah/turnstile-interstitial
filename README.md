@@ -1,87 +1,66 @@
 # Turnstile Interstitial
 
-This document explains the implementation of an authentication system using Cloudflare Workers and Durable Objects. The system employs a challenge-response mechanism for user verification, encrypts and stores credentials using Durable Objects, and handles login attempts with real-time IP address verification. It leverages Cloudflare's edge computing capabilities for security and performance.
+This system is designed to enforce rate limiting on web requests while providing a mechanism for users to verify themselves via a challenge when they exceed the rate limit. It utilizes Cloudflare Workers and Durable Objects to track request counts and cooldown periods for clients based on their IP address and `cf_clearance` cookie.
 
-## Overview
+## Features
 
-The implementation is divided into several parts:
+- **Rate Limiting**: Limits the number of requests a user can make within a specified time frame, helping to protect against abuse and excessive traffic.
+- **Challenge Verification**: Presents a challenge to users who exceed the rate limit, allowing legitimate users to continue after successful verification.
+- **Durable Storage**: Utilizes Durable Objects for persistent storage of rate limit counters and timestamps, ensuring consistency across requests.
+- **Flexible Response**: Serves either HTML or JSON responses based on the client's `Accept` header, accommodating both browser-based and API clients.
 
-- **ChallengeStatusStorage**: Manages the storage and retrieval of timestamp and IP address associated with a challenge verification using Durable Objects.
-- **CredentialsStorage**: Handles the encryption, storage, and retrieval of user credentials using Durable Objects.
-- **Main Fetch Handler**: Orchestrates the handling of different request paths, including login and verification processes.
-- **Utility Functions**: Includes functions for encryption, decryption, hashing, and challenge verification.
+## Components
 
-### ChallengeStatusStorage
+### `ChallengeStatusStorage` Durable Object
 
-This Durable Object class is responsible for storing and retrieving the timestamp and IP address when a user completes a challenge, ensuring real-time verification.
+Responsible for tracking rate limit counters and timestamps for each client IP and `cf_clearance` cookie pair.
 
-- **/getTimestampAndIP**: Retrieves the stored timestamp and IP address.
-- **/storeTimestampAndIP**: Stores the current timestamp and the client's IP address.
+#### Endpoints
 
-```javascript
-class ChallengeStatusStorage {
-  constructor(state, env) {
-    this.state = state;
-  }
+- `/getTimestampAndIP`: Retrieves the stored timestamp and IP address.
+- `/storeTimestampAndIP`: Stores or updates the timestamp and IP address.
+- `/deleteTimestampAndIP`: Deletes the stored timestamp and IP address.
+- `/checkRateLimit`: Checks if the client has exceeded the rate limit.
 
-  async fetch(request) {
-    // Implementation...
-  }
-}
-```
+### `CredentialsStorage` Durable Object
 
-### CredentialsStorage
+Manages encrypted storage of sensitive data, such as credentials or verification details.
 
-Manages user credentials securely by encrypting data before storage and decrypting it upon retrieval, using Durable Objects for secure and isolated storage.
+#### Endpoints
 
-- **/store**: Encrypts and stores user credentials.
-- **/retrieve**: Retrieves and decrypts user credentials, then deletes them from storage.
+- `/store`: Encrypts and stores data.
+- `/retrieve`: Decrypts and retrieves stored data, then deletes it from storage.
 
-```javascript
-class CredentialsStorage {
-  constructor(state, env) {
-    this.state = state;
-  }
+### Main Worker Script
 
-  async fetch(request) {
-    // Implementation...
-  }
-}
-```
+Handles incoming requests, directing them to the appropriate Durable Object or function based on the request path.
 
-### Main Fetch Handler
+#### Functions
 
-The primary entry point for handling requests. It routes requests based on their path and method, integrating with the challenge verification and login processes.
+- `getCfClearanceValue`: Extracts the `cf_clearance` cookie value from the request.
+- `handleLoginRequest`: Processes login requests, checking rate limits and serving challenges as necessary.
+- `handleGetLogin` and `handlePostLogin`: Handle specific login request methods, verifying challenges or storing login attempts.
+- `handleVerifyRequest`: Processes challenge verification responses.
+- `serveChallengePage`: Serves the challenge page to the client, with logic to respond with JSON for non-browser clients.
+- `serveRateLimitPage`: Informs the client they have exceeded the rate limit, with logic to respond with JSON for non-browser clients.
 
-```javascript
-async fetch(request, env, ctx) {
-  // Implementation...
-}
-```
+## Usage
 
-### Utility Functions
+1. **Rate Limit Checking**: Upon receiving a request, the system checks if the client has exceeded their rate limit using the `/checkRateLimit` endpoint of the `ChallengeStatusStorage` Durable Object.
+2. **Serving Challenges**: If the rate limit is exceeded, the client is served a challenge page (or JSON message for API clients) to verify themselves.
+3. **Verification and Access**: After successful verification, the client's rate limit counter is reset, allowing them to continue making requests.
 
-- **generateEncryptionKey**: Generates an AES-GCM encryption key.
-- **encryptData**: Encrypts data using the generated key and a random IV.
-- **decryptData**: Decrypts data using the provided key and IV.
-- **hashValue**: Generates a SHA-256 hash of a given value.
-- **getCfClearanceValue**: Extracts the `cf_clearance` cookie value from a request.
-- **handleLoginRequest**: Handles GET and POST requests to `/login` and `/api/login`.
-- **verifyChallengeStatus**: Verifies the challenge status by comparing stored data with the current request.
-- **verifyChallenge**: Verifies the challenge response using Cloudflare's Turnstile API.
-- **serveChallengePage**: Serves a challenge page with Cloudflare's Turnstile widget for user verification.
+## Deployment
+
+1. Deploy the Durable Objects (`ChallengeStatusStorage` and `CredentialsStorage`) to your Cloudflare Workers environment.
+2. Deploy the main worker script, ensuring it's configured to route requests to the appropriate Durable Object or function based on the URL path.
+3. Configure rate limit settings (max tokens, refill rate, and refill time) as needed for your application's requirements.
 
 ## Security Considerations
 
-- **Encryption**: User credentials are encrypted before storage, ensuring data confidentiality.
-- **IP Verification**: The challenge verification process includes IP address checking to prevent replay attacks.
-- **Challenge Mechanism**: Utilizes Cloudflare's Turnstile to protect against bots and automated attacks.
-
-## Dependencies
-
-- **Cloudflare Workers**: The implementation is designed to run on Cloudflare's edge computing platform.
-- **Durable Objects**: Used for storing timestamps, IP addresses, and encrypted credentials, providing strong consistency and isolation for data storage.
-- **Cloudflare Turnstile**: Provides the challenge-response mechanism for user verification.
+- Ensure that the challenge mechanism is robust and capable of distinguishing between legitimate users and automated traffic.
+- Regularly rotate the encryption key used by `CredentialsStorage` to secure stored data.
+- Monitor for unusual patterns of traffic or verification attempts that may indicate attempts to bypass the rate limiting system.
 
 ## Limitations
 
