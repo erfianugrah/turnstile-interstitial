@@ -7,30 +7,34 @@ export class ChallengeStatusStorage {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const clientIP = request.headers.get('CF-Connecting-IP'); // Get the client's IP address
+    try {
+      switch (url.pathname) {
+        case "/getTimestampAndIP":
+          const data = await this.state.storage.get("timestampAndIP");
+          if (!data) {
+            throw new Error("No data found");
+          }
+          return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
 
-    switch (url.pathname) {
-      case "/getTimestampAndIP":
-        const data = await this.state.storage.get("timestampAndIP");
-        if (!data) {
-          return new Response(JSON.stringify({ error: "No data found" }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-        }
-        return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
+        case "/storeTimestampAndIP":
+          const clientIP = request.headers.get('CF-Connecting-IP');
+          const timestampAndIP = { timestamp: Date.now(), ip: clientIP };
+          await this.state.storage.put("timestampAndIP", timestampAndIP);
+          return new Response("Timestamp and IP stored");
 
-      case "/storeTimestampAndIP":
-        const timestampAndIP = { timestamp: Date.now(), ip: clientIP };
-        await this.state.storage.put("timestampAndIP", timestampAndIP);
-        return new Response("Timestamp and IP stored");
+        case "/deleteTimestampAndIP":
+          await this.state.storage.delete("timestampAndIP");
+          return new Response("Timestamp and IP deleted", { status: 200 });
 
-      case "/deleteTimestampAndIP":
-        // Logic to delete the stored timestamp and IP
-        await this.state.storage.delete("timestampAndIP");
-        return new Response("Timestamp and IP deleted", { status: 200 });
-
-      default:
-        return new Response("Not found", { status: 404 });
+        default:
+          return new Response("Not found", { status: 404 });
+      }
+    } catch (error) {
+      console.error(`Error handling request: ${error.message}`);
+      return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
   }
+
 }
 
 export class CredentialsStorage {
@@ -141,34 +145,36 @@ async function getChallengeStatusStorage(env, cfClearanceValue) {
 }
 
 async function verifyChallengeStatus(request, env, cfClearanceValue) {
-  if (!cfClearanceValue) {
-    // If cf_clearance cookie is not present, challenge verification fails
-    return false;
-  }
+  try {
+    if (!cfClearanceValue) {
+      throw new Error("cf_clearance cookie is not present");
+    }
 
-  const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
-  const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
-  
-  if (!dataResponse.ok) {
-    // If unable to retrieve challenge status, challenge verification fails
-    return false;
-  }
+    const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
+    const dataResponse = await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/getTimestampAndIP"));
 
-  const data = await dataResponse.json();
-  const currentTime = Date.now();
-  const timeDifference = currentTime - parseInt(data.timestamp, 10);
-  const isTimestampValid = timeDifference < 150000; // 2.5 minutes
-  const isIPMatching = data.ip === request.headers.get('CF-Connecting-IP');
+    if (!dataResponse.ok) {
+      throw new Error("Unable to retrieve challenge status");
+    }
 
-  if (isTimestampValid && isIPMatching) {
-    // Challenge verification succeeded
+    const data = await dataResponse.json();
+    const currentTime = Date.now();
+    const timeDifference = currentTime - parseInt(data.timestamp, 10);
+    const isTimestampValid = timeDifference < 150000; // 2.5 minutes
+    const isIPMatching = data.ip === request.headers.get('CF-Connecting-IP');
+
+    if (!isTimestampValid || !isIPMatching) {
+      await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/deleteTimestampAndIP"), { method: "POST" });
+      throw new Error("Challenge verification failed");
+    }
+
     return true;
-  } else {
-    // Challenge verification failed, delete the old value
-    await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/deleteTimestampAndIP"), { method: "POST" });
+  } catch (error) {
+    console.error(`Verification error: ${error.message}`);
     return false;
   }
 }
+
 
 
 
