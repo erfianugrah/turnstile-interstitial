@@ -1,13 +1,33 @@
 import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue, getClientIP } from './utils.js'
 import { serveRateLimitPage, serveChallengePage } from './staticpages.js'
+import { verifyChallenge } from './siteverify.js'
 
-export class ChallengeStatusStorage {
-  constructor(state, env) {
+class BaseStorage {
+  constructor(state) {
     this.state = state;
+  }
+
+  async cleanupExpiredData(expirationTime) {
+    const keys = await this.state.storage.list();
+    const currentTime = Date.now();
+
+    for (const key of keys) {
+      const data = JSON.parse(await this.state.storage.get(key));
+      if (data && data.lastAccess && currentTime - data.lastAccess > expirationTime) {
+        await this.state.storage.delete(key);
+      }
+    }
+  }
+}
+
+export class ChallengeStatusStorage extends BaseStorage {
+  constructor(state, env) {
+    super(state); // Correctly calling super constructor
+    this.env = env;
     this.rateLimit = {
-      maxTokens: parseInt(env.MAX_TOKENS || '5', 10), // Default to 5 tokens if not specified
-      refillRate: parseInt(env.REFILL_RATE || '5', 10), // Default to 5 tokens per refill if not specified
-      refillTime: parseInt(env.REFILL_TIME || '60000', 10), // Default to 60000ms (1 minute) if not specified
+      maxTokens: parseInt(env.MAX_TOKENS || '5', 10),
+      refillRate: parseInt(env.REFILL_RATE || '5', 10),
+      refillTime: parseInt(env.REFILL_TIME || '60000', 10),
     };
   }
 
@@ -79,9 +99,10 @@ export class ChallengeStatusStorage {
   }
 }
 
-export class CredentialsStorage {
+export class CredentialsStorage extends BaseStorage {
   constructor(state, env) {
-    this.state = state;
+    super(state); // Correctly calling super constructor
+    this.env = env; // This line is added if you need to use env in CredentialsStorage, otherwise remove it.
   }
 
   async fetch(request) {
@@ -102,6 +123,17 @@ export class CredentialsStorage {
     return new Response("Not found", { status: 404 });
   }
 }
+
+addEventListener('scheduled', event => {
+  event.waitUntil(
+    (async () => {
+      const challengeStatusStorage = new ChallengeStatusStorage(state, env); // Assuming state and env are accessible
+      const credentialsStorage = new CredentialsStorage(state, env);
+      await challengeStatusStorage.cleanupExpiredData(24 * 60 * 60 * 1000); // Cleanup after 24 hours
+      await credentialsStorage.cleanupExpiredData(24 * 60 * 60 * 1000); // Cleanup after 24 hours
+    })()
+  );
+});
 
 export default {
   async fetch(request, env, ctx) {
@@ -252,33 +284,4 @@ async function checkRateLimit(env, clientIP, cfClearance) {
   console.log('Rate limit check status:', rateLimitCheck.status);
 
   return rateLimitCheck;
-}
-
-async function verifyChallenge(request, env) {
-  const body = await request.formData();
-  const token = body.get('cf-turnstile-response');
-  const ip = await getClientIP(request);
-  const originalUrl = body.get('originalUrl')
-
-  // Validate the token by calling the "/siteverify" API.
-  let formData = new FormData();
-  formData.append('secret', env.SECRET_KEY);
-  formData.append('response', token);
-  formData.append('remoteip', ip);
-
-
-  const result = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    body: formData,
-    method: 'POST',
-  });
-
-  const outcome = await result.json();
-  console.log(JSON.stringify(outcome)); // This will log the full response body as a string
-  if (!outcome.success) {
-    // Handle verification failure
-    return new Response('The provided Turnstile token was not valid!', { status: 401 });
-  }
-
-  // Redirect the user to the decoded original URL upon successful verification
-  return Response.redirect(originalUrl, 302);
 }
