@@ -4,6 +4,10 @@ compatibility_date = "2023-02-18"
 account_id = "25f21f141824546aa72c74451a11b419"
 route = { pattern = "file.erfianugrah.com/*", custom_domain = false, zone_id = "3f2c4daa43d5920f313654a873b31d06" }
 
+# Secrets
+# SITE_KEY
+# SECRET_KEY
+
 [vars]
 MAX_TOKENS = "5"
 REFILL_RATE = "5"
