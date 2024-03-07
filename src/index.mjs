@@ -48,7 +48,7 @@ export class ChallengeStatusStorage {
     const clientIP = await getClientIP(request);
     const cfClearanceMatch = await getCfClearanceValue(request);
     if (!cfClearanceMatch) {
-      return new Response("cf_clearance cookie is missing", { status: 400 });
+      return serveChallengePage(env, request);
     }
     const cfClearance = cfClearanceMatch[1];
     const identifier = await hashValue(`${clientIP}-${cfClearance}`);
