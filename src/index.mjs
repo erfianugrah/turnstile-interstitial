@@ -1,10 +1,14 @@
-import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue } from './utils.js'
+import { hashValue, generateEncryptionKey, encryptData, decryptData, getCfClearanceValue, getClientIP } from './utils.js'
 import { serveRateLimitPage, serveChallengePage } from './staticpages.js'
 
 export class ChallengeStatusStorage {
   constructor(state, env) {
     this.state = state;
-    this.rateLimit = { maxTokens: 5, refillRate: 5, refillTime: 60000 }; // 5 tokens per minute
+    this.rateLimit = {
+      maxTokens: parseInt(env.MAX_TOKENS || '5', 10), // Default to 5 tokens if not specified
+      refillRate: parseInt(env.REFILL_RATE || '5', 10), // Default to 5 tokens per refill if not specified
+      refillTime: parseInt(env.REFILL_TIME || '60000', 10), // Default to 60000ms (1 minute) if not specified
+    };
   }
 
   async fetch(request) {
@@ -19,7 +23,7 @@ export class ChallengeStatusStorage {
           return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
 
         case "/storeTimestampAndIP":
-          const clientIP = request.headers.get('CF-Connecting-IP');
+          const clientIP = await getClientIP(request);
           const timestampAndIP = { timestamp: Date.now(), ip: clientIP };
           await this.state.storage.put("timestampAndIP", timestampAndIP);
           return new Response("Timestamp and IP stored");
@@ -41,13 +45,13 @@ export class ChallengeStatusStorage {
   }
 
   async checkRateLimit(request) {
-    const clientIP = request.headers.get('CF-Connecting-IP');
+    const clientIP = await getClientIP(request);
     const cfClearanceMatch = await getCfClearanceValue(request);
     if (!cfClearanceMatch) {
       return new Response("cf_clearance cookie is missing", { status: 400 });
     }
     const cfClearance = cfClearanceMatch[1];
-    const identifier = `${clientIP}-${cfClearance}`;
+    const identifier = await hashValue(`${clientIP}-${cfClearance}`);
 
     let rateLimitInfo = await this.state.storage.get(identifier);
     if (!rateLimitInfo) {
@@ -73,7 +77,6 @@ export class ChallengeStatusStorage {
       return new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
     }
   }
-
 }
 
 export class CredentialsStorage {
@@ -124,11 +127,11 @@ async function handleLoginRequest(request, env) {
   const cfClearance = await getCfClearanceValue(request);
 
   // Extract client IP for rate limiting check
-  const clientIP = request.headers.get('CF-Connecting-IP');
+  const clientIP = await getClientIP(request);
 
   // Ensure cfClearance is available before proceeding
   if (!cfClearance) {
-    return new Response("cf_clearance cookie is missing", { status: 400 });
+    return serveChallengePage(env, request);
   }
 
   // Use the refactored function to perform the rate limit check
@@ -190,7 +193,7 @@ async function handleVerifyRequest(request, env, cfClearanceValue) {
   const response = await verifyChallenge(request, env);
   if (response.status === 302 && cfClearanceValue) {
     const challengeStatusStorage = await getChallengeStatusStorage(env, cfClearanceValue);
-    await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': request.headers.get('CF-Connecting-IP') } }));
+    await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/storeTimestampAndIP", { headers: { 'CF-Connecting-IP': await getClientIP(request) } }));
   }
   return response;
 }
@@ -219,8 +222,8 @@ async function verifyChallengeStatus(request, env, cfClearanceValue) {
     const data = await dataResponse.json();
     const currentTime = Date.now();
     const timeDifference = currentTime - parseInt(data.timestamp, 10);
-    const isTimestampValid = timeDifference < 150000; // 2.5 minutes
-    const isIPMatching = data.ip === request.headers.get('CF-Connecting-IP');
+    const isTimestampValid = timeDifference < env.TIME_TO_CHALLENGE;
+    const isIPMatching = data.ip === await getClientIP(request);
 
     if (!isTimestampValid || !isIPMatching) {
       await challengeStatusStorage.fetch(new Request("https://challengestorage.internal/deleteTimestampAndIP"), { method: "POST" });
@@ -254,7 +257,7 @@ async function checkRateLimit(env, clientIP, cfClearance) {
 async function verifyChallenge(request, env) {
   const body = await request.formData();
   const token = body.get('cf-turnstile-response');
-  const ip = request.headers.get('CF-Connecting-IP');
+  const ip = await getClientIP(request);
   const originalUrl = body.get('originalUrl')
 
   // Validate the token by calling the "/siteverify" API.

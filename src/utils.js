@@ -52,3 +52,7 @@ export async function getCfClearanceValue(request) {
     const matches = cookies?.match(/cf_clearance=([^;]+)/);
     return matches ? matches[1] : null;
 }
+
+export async function getClientIP(request) {
+  return request.headers.get('CF-Connecting-IP');
+}

@@ -106,90 +106,125 @@ export async function serveRateLimitPage(cooldownEndTime, request) {
     }
 
     const rateLimitPageContent = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Rate Limit Exceeded</title>
-        <style>
-            :root {
-                color-scheme: light dark;
-            }
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-                background-color: #f0f2f5; /* Light mode background color */
-                color: #555; /* Light mode text color */
-                transition: background-color 0.3s, color 0.3s;
-            }
-            @media (prefers-color-scheme: dark) {
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Rate Limit Exceeded</title>
+            <style>
+                :root {
+                    color-scheme: light dark;
+                }
                 body {
-                    background-color: #333; /* Dark mode background color */
-                    color: #f0f2f5; /* Dark mode text color */
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    background-color: #f0f2f5; /* Light mode background color */
+                    color: #555; /* Light mode text color */
+                    transition: background-color 0.3s, color 0.3s;
                 }
-            }
-            .rate-limit-container {
-                text-align: center;
-                padding: 50px;
-                border-radius: 10px;
-                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-                max-width: 400px;
-                width: 100%;
-                background-color: #e0e0e0; /* Lighter grey for the container in light mode */
-                transition: background-color 0.3s;
-            }
-            @media (prefers-color-scheme: dark) {
+                @media (prefers-color-scheme: dark) {
+                    body {
+                        background-color: #333; /* Dark mode background color */
+                        color: #f0f2f5; /* Dark mode text color */
+                    }
+                }
                 .rate-limit-container {
-                    background-color: #3c3c3c; /* Darker grey for the container in dark mode */
+                    text-align: center;
+                    padding: 50px;
+                    border-radius: 10px;
+                    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+                    max-width: 400px;
+                    width: 100%;
+                    background-color: #e0e0e0; /* Lighter grey for the container in light mode */
+                    transition: background-color 0.3s;
                 }
-            }
-            h1 {
-                margin-bottom: 30px;
-                font-size: 24px;
-            }
-            #cooldownTimer {
-                font-size: 20px;
-                font-weight: bold;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="rate-limit-container">
-            <h1>Rate Limit Exceeded</h1>
-            <p>You have exceeded the rate limit for requests. Please wait until the cooldown period has passed before making another request.</p>
-            <p>Cooldown ends at: <span id="cooldownTimer">${cooldownEndTimeString}</span></p>
-        </div>
-        <script>
-            const cooldownEndTime = new Date("${cooldownEndTime.toISOString()}").getTime();
-            const timerElement = document.getElementById('cooldownTimer');
-
-            function updateTimer() {
-                const now = new Date().getTime();
-                const distance = cooldownEndTime - now;
-
-                if (distance < 0) {
-                    clearInterval(interval);
-                    timerElement.innerHTML = "Cooldown period has ended. You may now make another request.";
-                    return;
+                @media (prefers-color-scheme: dark) {
+                    .rate-limit-container {
+                        background-color: #3c3c3c; /* Darker grey for the container in dark mode */
+                    }
                 }
+                h1 {
+                    margin-bottom: 30px;
+                    font-size: 24px;
+                }
+                #cooldownTimer {
+                    font-size: 20px;
+                    font-weight: bold;
+                    margin-bottom: 20px; /* Add some space above the button */
+                }
+                #retryButton {
+                    font-size: 16px;
+                    padding: 10px 20px;
+                    color: #fff;
+                    background-color: #007bff;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                }
+                #retryButton:hover {
+                    background-color: #0056b3;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="rate-limit-container">
+                <h1 id="rateLimitTitle">Kalm, try again later</h1>
+                <p id="cooldownMessage">You have exceeded the rate limit for requests. Please wait until the cooldown period has passed before making another request.</p>
+                <p>Cooldown ends at: <span id="cooldownTimer"></span></p>
+                <button id="retryButton" style="display:none;">Retry Now</button>
+            </div>
+                <script>
+                    const cooldownEndTime = new Date("${cooldownEndTime.toISOString()}").getTime();
+                    const timerElement = document.getElementById('cooldownTimer');
+                    const retryButton = document.getElementById('retryButton');
+                    const cooldownMessage = document.getElementById('cooldownMessage');
+                    const rateLimitTitle = document.getElementById('rateLimitTitle'); // Get the h1 element
+                    let redirectTimeout;
 
-                const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+                    function updateTimer() {
+                        const now = new Date().getTime();
+                        const distance = cooldownEndTime - now;
 
-                timerElement.innerHTML = minutes + "m " + seconds + "s ";
-            }
+                        if (distance < 0) {
+                            clearInterval(interval);
+                            // Update the h1 text to indicate the user can try again
+                            rateLimitTitle.textContent = "You may try again now";
+                            // Hide the cooldown message and timer
+                            cooldownMessage.style.display = 'none';
+                            timerElement.parentElement.style.display = 'none';
+                            // Display the retry button
+                            retryButton.style.display = 'inline-block';
+                            // Set a timeout for automatic redirection
+                            redirectTimeout = setTimeout(function() {
+                                window.location.reload(); // Automatically reload the page after 5 seconds
+                            }, 5000);
+                            return;
+                        }
 
-            const interval = setInterval(updateTimer, 1000);
-            updateTimer(); // Initial update
-        </script>
-    </body>
-    </html>
-  `;
+                        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+                        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+                        timerElement.innerHTML = minutes + "m " + seconds + "s ";
+                    }
+
+                    retryButton.addEventListener('click', function() {
+                        clearTimeout(redirectTimeout); // Cancel the auto-redirect
+                        window.location.reload(); // Reload the page
+                    });
+
+                    const interval = setInterval(updateTimer, 1000);
+                    updateTimer(); // Initial update
+                </script>
+
+        </body>
+        </html>
+    `;
 
     // Set headers to prevent caching
     const headers = new Headers({
