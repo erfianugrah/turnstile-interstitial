@@ -194,7 +194,7 @@ export async function serveRateLimitPage(cooldownEndTime, request) {
                         if (distance < 0) {
                             clearInterval(interval);
                             // Update the h1 text to indicate the user can try again
-                            rateLimitTitle.textContent = "You may try again now";
+                            rateLimitTitle.textContent = "Press the button below or wait 5 seconds";
                             // Hide the cooldown message and timer
                             cooldownMessage.style.display = 'none';
                             timerElement.parentElement.style.display = 'none';
