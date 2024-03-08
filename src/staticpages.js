@@ -176,7 +176,7 @@ export async function serveRateLimitPage(cooldownEndTime, request) {
             <div class="rate-limit-container">
                 <h1 id="rateLimitTitle">Kalm, try again later</h1>
                 <p id="cooldownMessage">You have exceeded the rate limit for requests. Please wait until the cooldown period has passed before making another request.</p>
-                <p>Cooldown ends at: <span id="cooldownTimer"></span></p>
+                <p>Cooldown ends in <span id="cooldownTimer"></span></p>
                 <button id="retryButton" style="display:none;">Retry Now</button>
             </div>
                 <script>

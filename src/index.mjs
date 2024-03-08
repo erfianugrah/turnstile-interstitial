@@ -74,29 +74,30 @@ export class ChallengeStatusStorage extends BaseStorage {
     const identifier = await hashValue(`${clientIP}-${cfClearance}`);
 
     let rateLimitInfo = await this.state.storage.get(identifier);
+    const currentTime = Date.now();
     if (!rateLimitInfo) {
-      rateLimitInfo = { tokens: this.rateLimit.maxTokens, lastRefill: Date.now() };
+      rateLimitInfo = { tokens: this.rateLimit.maxTokens - 1, nextAllowedRequest: currentTime + this.rateLimit.refillTime };
     } else {
       rateLimitInfo = JSON.parse(rateLimitInfo);
-      const timeSinceLastRefill = Date.now() - rateLimitInfo.lastRefill;
-      const tokensToAdd = Math.floor(timeSinceLastRefill / this.rateLimit.refillTime) * this.rateLimit.refillRate;
-      if (tokensToAdd > 0) { // Only update lastRefill if tokens are actually added
-        rateLimitInfo.tokens = Math.min(rateLimitInfo.tokens + tokensToAdd, this.rateLimit.maxTokens);
-        rateLimitInfo.lastRefill = Date.now(); // Update lastRefill only here
+      if (currentTime >= rateLimitInfo.nextAllowedRequest) {
+        rateLimitInfo.tokens = this.rateLimit.maxTokens;
+      }
+      if (rateLimitInfo.tokens > 0) {
+        rateLimitInfo.tokens--;
+        rateLimitInfo.nextAllowedRequest = currentTime + this.rateLimit.refillTime;
       }
     }
 
     if (rateLimitInfo.tokens > 0) {
-      rateLimitInfo.tokens--;
       await this.state.storage.put(identifier, JSON.stringify(rateLimitInfo));
       return new Response("Allowed", { status: 200 });
     } else {
-      // Calculate the cooldown end time based on the last refill time and refill rate
-      const cooldownEndTime = new Date(rateLimitInfo.lastRefill + this.rateLimit.refillTime).toISOString();
+      const cooldownEndTime = new Date(rateLimitInfo.nextAllowedRequest).toISOString();
       const body = JSON.stringify({ message: "Rate limit exceeded", cooldownEndTime });
       return new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } });
     }
   }
+
 }
 
 export class CredentialsStorage extends BaseStorage {
