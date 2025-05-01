@@ -1,0 +1,84 @@
+{
+  // Project name
+  "name": "turnstile-interstitial",
+  // Entry point for your Worker
+  "main": "src/index.mjs",
+  // Worker compatibility date
+  "compatibility_date": "2023-02-18",
+  // Cloudflare account info
+  "account_id": "25f21f141824546aa72c74451a11b419",
+  // Route definition for the worker
+  "routes": [
+    {
+      "pattern": "quantum.erfianugrah.com/*",
+      "custom_domain": false,
+      "zone_id": "3f2c4daa43d5920f313654a873b31d06"
+    }
+  ],
+  // Environment variables
+  "vars": {
+    "MAX_TOKENS": "5",
+    "REFILL_RATE": "5",
+    "REFILL_TIME": "60000",
+    "TIME_TO_CHALLENGE": "150000"
+  },
+  // Secrets (commented here as a reminder)
+  // These need to be set using wrangler secret commands:
+  // "SITE_KEY"
+  // "SECRET_KEY"
+  // "ADMIN_PASSWORD"
+  // Durable Objects configuration
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHALLENGE_STATUS",
+        "class_name": "ChallengeStatusStorage"
+      },
+      {
+        "name": "CREDENTIALS_STORAGE",
+        "class_name": "CredentialsStorage"
+      }
+    ]
+  },
+  
+  "kv_namespaces": [
+    {
+      "binding": "TURNSTILE_CONFIG",
+      "id": "b2536bfd85474e9f840de674a087ad30", 
+      "preview_id": "b2536bfd85474e9f840de674a087ad30" // Using same ID for preview
+    }
+  ],
+  // Migrations for Durable Objects
+  "migrations": [
+    {
+      "tag": "v1", // Should be unique for each entry
+      "new_classes": [
+        "ChallengeStatusStorage"
+      ]
+    },
+    {
+      "tag": "v2", // Should be unique for each entry
+      "new_classes": [
+        "CredentialsStorage"
+      ]
+    },
+    {
+      "tag": "v3", // Should be unique for each entry
+      "deleted_classes": [
+        "RateLimiter"
+      ]
+    },
+    {
+      "tag": "remove_rate_limiter", // Should be unique for each entry
+      "deleted_classes": [
+        "RateLimiter"
+      ]
+    }
+  ],
+  // Scheduled triggers (crons)
+  "triggers": {
+    "crons": [
+      "0 0 * * *"
+    ]
+  }
+}

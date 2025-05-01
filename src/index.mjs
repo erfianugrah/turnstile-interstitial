@@ -1,376 +1,159 @@
-import {
-  decryptData,
-  encryptData,
-  generateEncryptionKey,
-  getCfClearanceValue,
-  getClientIP,
-  hashValue,
-} from "./utils.js";
-import { serveChallengePage, serveRateLimitPage } from "./staticpages.js";
-import { verifyChallenge } from "./siteverify.js";
+import { Hono } from 'hono';
+import { ScheduledService } from './services/scheduled-service.js';
+import { ConfigService } from './services/config-service.js';
+import { logger, createRequestLogger } from './utils/logger.js';
+import { loggerMiddleware } from './middleware/logger.js';
+import { errorHandlerMiddleware } from './middleware/error-handler.js';
+import { createInterstitialMiddleware } from './middleware/interstitial.js';
 
-class BaseStorage {
-  constructor(state) {
-    this.state = state;
-  }
+// Import routes
+import verifyRouter from './routes/verify.js';
+import adminRouter from './routes/admin.js';
 
-  async cleanupExpiredData(expirationTime) {
-    const keys = await this.state.storage.list();
-    const currentTime = Date.now();
+// Import Durable Objects
+export { ChallengeStatusStorage } from './durable-objects/challenge-status-storage.js';
+export { CredentialsStorage } from './durable-objects/credentials-storage.js';
 
-    for (const key of keys) {
-      const data = JSON.parse(await this.state.storage.get(key));
-      if (
-        data && data.lastAccess &&
-        currentTime - data.lastAccess > expirationTime
-      ) {
-        await this.state.storage.delete(key);
-      }
-    }
-  }
-}
-
-export class ChallengeStatusStorage extends BaseStorage {
-  constructor(state, env) {
-    super(state); // Correctly calling super constructor
-    this.env = env;
-    this.rateLimit = {
-      maxTokens: parseInt(env.MAX_TOKENS || "5", 10),
-      refillRate: parseInt(env.REFILL_RATE || "5", 10),
-      refillTime: parseInt(env.REFILL_TIME || "60000", 10),
-    };
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    try {
-      switch (url.pathname) {
-        case "/getTimestampAndIP": {
-          const data = await this.state.storage.get("timestampAndIP");
-          if (!data) {
-            throw new Error("No data found");
-          }
-          return new Response(JSON.stringify(data), {
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
-        case "/storeTimestampAndIP": {
-          const clientIP = await getClientIP(request);
-          const timestampAndIP = { timestamp: Date.now(), ip: clientIP };
-          await this.state.storage.put("timestampAndIP", timestampAndIP);
-          return new Response("Timestamp and IP stored");
-        }
-
-        case "/deleteTimestampAndIP": {
-          await this.state.storage.delete("timestampAndIP");
-          return new Response("Timestamp and IP deleted", { status: 200 });
-        }
-
-        case "/checkRateLimit": {
-          return this.checkRateLimit(request);
-        }
-
-        default: {
-          return new Response("Not found", { status: 404 });
-        }
-      }
-    } catch (error) {
-      console.error(`Error handling request: ${error.message}`);
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-  }
-
-  async checkRateLimit(request) {
-    const clientIP = await getClientIP(request);
-    const cfClearanceMatch = await getCfClearanceValue(request);
-    if (!cfClearanceMatch) {
-      return serveChallengePage(env, request);
-    }
-    const cfClearance = cfClearanceMatch[1];
-    const identifier = await hashValue(`${clientIP}-${cfClearance}`);
-
-    let rateLimitInfo = await this.state.storage.get(identifier);
-    const currentTime = Date.now();
-    if (!rateLimitInfo) {
-      rateLimitInfo = {
-        tokens: this.rateLimit.maxTokens - 1,
-        nextAllowedRequest: currentTime + this.rateLimit.refillTime,
-      };
-    } else {
-      rateLimitInfo = JSON.parse(rateLimitInfo);
-      if (currentTime >= rateLimitInfo.nextAllowedRequest) {
-        rateLimitInfo.tokens = this.rateLimit.maxTokens;
-      }
-      if (rateLimitInfo.tokens > 0) {
-        rateLimitInfo.tokens--;
-        rateLimitInfo.nextAllowedRequest = currentTime +
-          this.rateLimit.refillTime;
-      }
-    }
-
-    if (rateLimitInfo.tokens > 0) {
-      await this.state.storage.put(identifier, JSON.stringify(rateLimitInfo));
-      return new Response("Allowed", { status: 200 });
-    } else {
-      const cooldownEndTime = new Date(rateLimitInfo.nextAllowedRequest)
-        .toISOString();
-      const body = JSON.stringify({
-        message: "Rate limit exceeded",
-        cooldownEndTime,
-      });
-      return new Response(body, {
-        status: 429,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-  }
-}
-
-export class CredentialsStorage extends BaseStorage {
-  constructor(state, env) {
-    super(state); // Correctly calling super constructor
-    this.env = env; // This line is added if you need to use env in CredentialsStorage, otherwise remove it.
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const key = await generateEncryptionKey(); // Generate a new key for each operation
-
-    if (url.pathname === "/store") {
-      const details = await request.json();
-      const { encryptedData, iv } = await encryptData(
-        key,
-        JSON.stringify(details),
-      );
-      await this.state.storage.put(
-        "encryptedCredentials",
-        JSON.stringify({
-          encryptedData: Array.from(new Uint8Array(encryptedData)),
-          iv: Array.from(iv),
-        }),
-      );
-      return new Response("Credentials stored", { status: 200 });
-    } else if (url.pathname === "/retrieve") {
-      const { encryptedData, iv } = JSON.parse(
-        await this.state.storage.get("encryptedCredentials"),
-      );
-      const decryptedData = await decryptData(
-        key,
-        new Uint8Array(encryptedData),
-        new Uint8Array(iv),
-      );
-      await this.state.storage.delete("encryptedCredentials");
-      return new Response(decryptedData, { status: 200 });
-    }
-    return new Response("Not found", { status: 404 });
-  }
-}
-
+// Scheduled cleanup task - runs once per day (see wrangler.toml or jsonc cron setting)
 addEventListener("scheduled", (event) => {
   event.waitUntil(
     (async () => {
-      const challengeStatusStorage = new ChallengeStatusStorage(state, env); // Assuming state and env are accessible
-      const credentialsStorage = new CredentialsStorage(state, env);
-      await challengeStatusStorage.cleanupExpiredData(24 * 60 * 60 * 1000); // Cleanup after 24 hours
-      await credentialsStorage.cleanupExpiredData(24 * 60 * 60 * 1000); // Cleanup after 24 hours
+      try {
+        await ScheduledService.handleScheduledCleanup(event.env);
+      } catch (error) {
+        logger.error(
+          { err: error },
+          'Unhandled error in scheduled cleanup'
+        );
+      }
     })(),
   );
 });
 
+// Setup the worker entry point
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    // Correctly await the asynchronous call to getCfClearanceValue
-    const cfClearanceValue = await getCfClearanceValue(request);
-
-    if (/^\/login/.test(url.pathname)) {
-      return handleLoginRequest(request, env, cfClearanceValue);
-    }
-
-    if (/^\/verify/.test(url.pathname) && request.method === "POST") {
-      return handleVerifyRequest(request, env, cfClearanceValue);
-    }
-
-    return fetch(request);
-  },
-};
-
-async function handleLoginRequest(request, env) {
-  const url = new URL(request.url);
-  // Use the existing function to get the cf_clearance value
-  const cfClearance = await getCfClearanceValue(request);
-
-  // Extract client IP for rate limiting check
-  const clientIP = await getClientIP(request);
-
-  // Ensure cfClearance is available before proceeding
-  if (!cfClearance) {
-    return serveChallengePage(env, request);
-  }
-
-  // Use the refactored function to perform the rate limit check
-  const rateLimitCheck = await checkRateLimit(env, clientIP, cfClearance);
-  if (rateLimitCheck.status === 429) {
-    // Correctly parse the JSON body to get the cooldownEndTime
-    const responseBody = await rateLimitCheck.json();
-    const cooldownEndTime = new Date(responseBody.cooldownEndTime);
-    const now = new Date();
-
-    // If the cooldown period has ended, serve the challenge page to get a new cookie
-    if (now > cooldownEndTime) {
-      return serveChallengePage(env, request);
-    } else {
-      // If still within the cooldown period, serve the rate limit page
-      return serveRateLimitPage(cooldownEndTime, request);
-    }
-  }
-
-  // Proceed with the login request handling
-  if (request.method === "GET") {
-    return handleGetLogin(request, env, cfClearance);
-  } else if (url.pathname === "/api/login" && request.method === "POST") {
-    return handlePostLogin(request, env, cfClearance);
-  }
-}
-
-async function handleGetLogin(request, env, cfClearanceValue) {
-  const isVerified = await verifyChallengeStatus(
-    request,
-    env,
-    cfClearanceValue,
-  );
-  if (isVerified) {
-    return fetch(request);
-  }
-  return serveChallengePage(env, request);
-}
-
-async function handlePostLogin(request, env, cfClearanceValue) {
-  const isVerified = await verifyChallengeStatus(
-    request,
-    env,
-    cfClearanceValue,
-  );
-  if (!isVerified) {
-    return serveChallengePage(env, request);
-  }
-
-  // Proceed with storing the login attempt details since the challenge is verified
-  const requestBody = await request.json();
-  const requestHeaders = Object.fromEntries(
-    [...request.headers].filter(([key]) =>
-      !["host", "cookie", "content-length"].includes(key.toLowerCase())
-    ),
-  );
-  const loginAttemptId = crypto.randomUUID();
-
-  const storage = env.CREDENTIALS_STORAGE.get(
-    env.CREDENTIALS_STORAGE.idFromName(loginAttemptId),
-  );
-  await storage.fetch("https://challengestorage.internal/store", {
-    method: "POST",
-    body: JSON.stringify({
-      body: requestBody,
-      headers: requestHeaders,
-      method: request.method,
-      url: request.url,
-    }),
-  });
-
-  // Optionally, you might want to redirect the user or take another action after storing the details
-  return new Response(
-    "Login attempt stored. Please complete the challenge if required.",
-    { status: 200 },
-  );
-}
-
-async function handleVerifyRequest(request, env, cfClearanceValue) {
-  const response = await verifyChallenge(request, env);
-  if (response.status === 302 && cfClearanceValue) {
-    const challengeStatusStorage = await getChallengeStatusStorage(
+    // Create a new Hono app instance for each request
+    const app = new Hono();
+    
+    // Create the config service
+    const configService = new ConfigService({
+      kv: env.TURNSTILE_CONFIG,
       env,
-      cfClearanceValue,
-    );
-    await challengeStatusStorage.fetch(
-      new Request("https://challengestorage.internal/storeTimestampAndIP", {
-        headers: { "CF-Connecting-IP": await getClientIP(request) },
-      }),
-    );
-  }
-  return response;
-}
-
-async function getChallengeStatusStorage(env, cfClearanceValue) {
-  const hashedCfClearanceValue = await hashValue(cfClearanceValue);
-  console.log(hashedCfClearanceValue);
-  const challengeStatusStorageId = env.CHALLENGE_STATUS.idFromName(
-    hashedCfClearanceValue,
-  );
-  console.log(challengeStatusStorageId);
-  return env.CHALLENGE_STATUS.get(challengeStatusStorageId);
-}
-
-async function verifyChallengeStatus(request, env, cfClearanceValue) {
-  try {
-    if (!cfClearanceValue) {
-      throw new Error("cf_clearance cookie is not present");
-    }
-
-    const challengeStatusStorage = await getChallengeStatusStorage(
+    });
+    
+    // Get the configuration
+    const config = await configService.getConfig();
+    
+    // Apply the interstitial middleware to the app based on configuration
+    const interstitialMiddleware = createInterstitialMiddleware({
+      config,
       env,
-      cfClearanceValue,
-    );
-    const dataResponse = await challengeStatusStorage.fetch(
-      new Request("https://challengestorage.internal/getTimestampAndIP"),
-    );
-
-    if (!dataResponse.ok) {
-      throw new Error("Unable to retrieve challenge status");
-    }
-
-    const data = await dataResponse.json();
-    const currentTime = Date.now();
-    const timeDifference = currentTime - parseInt(data.timestamp, 10);
-    const isTimestampValid = timeDifference < env.TIME_TO_CHALLENGE;
-    const isIPMatching = data.ip === await getClientIP(request);
-
-    if (!isTimestampValid || !isIPMatching) {
-      await challengeStatusStorage.fetch(
-        new Request("https://challengestorage.internal/deleteTimestampAndIP"),
-        { method: "POST" },
+    });
+    
+    // Setup global middleware first
+    app.use('*', loggerMiddleware());
+    app.use('*', errorHandlerMiddleware());
+    
+    // Add the interstitial middleware to all routes
+    app.use('*', async (c, next) => {
+      // Make config service available to handlers
+      c.set('configService', configService);
+      
+      // Apply the interstitial middleware
+      return interstitialMiddleware(c, next);
+    });
+    
+    // Admin routes - protected with basic auth
+    app.use('/admin/*', async (c, next) => {
+      // Skip auth check for debug endpoint in development
+      const isDev = c.env.ENVIRONMENT === 'development';
+      const isDebugEndpoint = c.req.path === '/admin/debug';
+      
+      // Skip auth for debug endpoint in development or allow auth fallback
+      if (isDev && isDebugEndpoint) {
+        return next();
+      }
+      
+      // Simple admin protection using a basic auth check
+      const authHeader = c.req.header('Authorization');
+      
+      if (!authHeader || !authHeader.startsWith('Basic ')) {
+        return new Response('Unauthorized', {
+          status: 401,
+          headers: {
+            'WWW-Authenticate': 'Basic realm="Admin Area"',
+          },
+        });
+      }
+      
+      // Decode the credentials
+      const credentials = atob(authHeader.substring(6));
+      const [username, password] = credentials.split(':');
+      
+      // Check if credentials are valid or use fallback for development
+      const validAdmin = username === 'admin' && password === c.env.ADMIN_PASSWORD;
+      const validFallback = isDev && username === 'admin' && password === 'development';
+      
+      if (!validAdmin && !validFallback) {
+        return new Response('Unauthorized', {
+          status: 401,
+          headers: {
+            'WWW-Authenticate': 'Basic realm="Admin Area"',
+          },
+        });
+      }
+      
+      return next();
+    });
+    
+    // Register routes
+    app.route('/verify', verifyRouter);
+    app.route('/admin', adminRouter);
+    
+    // Add a catch-all handler for proxying requests to the origin
+    app.all('*', async (c) => {
+      const logger = c.get('logger');
+      
+      // Check if the request has passed interstitial checks
+      // If we've reached here, it means all middleware has been passed
+      logger.info(
+        { path: c.req.path, method: c.req.method },
+        'Proxying request to origin'
       );
-      throw new Error("Challenge verification failed");
-    }
-
-    return true;
-  } catch (error) {
-    console.error(`Verification error: ${error.message}`);
-    return false;
+      
+      // Clone the original request and pass it through
+      try {
+        // Get the original fetch method to avoid intercepting
+        const originalFetch = globalThis.fetch;
+        
+        // Create a new request based on the original
+        const url = new URL(c.req.url);
+        
+        // Use the same request method, headers, and body
+        const proxyRequest = new Request(url.toString(), {
+          method: c.req.method,
+          headers: c.req.raw.headers,
+          body: c.req.method !== 'GET' && c.req.method !== 'HEAD' ? await c.req.raw.clone().arrayBuffer() : undefined,
+          redirect: 'manual' // Don't follow redirects automatically
+        });
+        
+        // Forward the request to the origin
+        const response = await originalFetch(proxyRequest);
+        
+        // Return the response from origin
+        return response;
+      } catch (error) {
+        logger.error(
+          { err: error, path: c.req.path },
+          'Error proxying request to origin'
+        );
+        
+        return c.text(`Error proxying request: ${error.message}`, 500);
+      }
+    });
+    
+    // Handle the request
+    return app.fetch(request, env, ctx);
   }
-}
-
-async function checkRateLimit(env, clientIP, cfClearance) {
-  // Construct a request for the rate limit check
-  const rateLimitRequest = new Request(
-    "https://challengestorage.internal/checkRateLimit",
-    {
-      method: "POST",
-      headers: new Headers({
-        "CF-Connecting-IP": clientIP,
-        "Cookie": `cf_clearance=${cfClearance}`,
-      }),
-    },
-  );
-
-  // Perform the rate limit check
-  const rateLimitCheck = await env.CHALLENGE_STATUS.get(
-    env.CHALLENGE_STATUS.idFromName("rateLimiter"),
-  ).fetch(rateLimitRequest);
-  console.log("Rate limit check status:", rateLimitCheck.status);
-
-  return rateLimitCheck;
-}
+};

@@ -1,71 +1,168 @@
 # Turnstile Interstitial
 
-This system is designed to enforce rate limiting on web requests while providing a mechanism for users to verify themselves via a challenge when they exceed the rate limit. It utilizes Cloudflare Workers and Durable Objects to track request counts and cooldown periods for clients based on their IP address and `cf_clearance` cookie.
+A powerful, configurable Cloudflare Worker for implementing Turnstile challenge interstitials and rate limiting with automatic replay of POST requests.
 
 ## Features
 
-- **Rate Limiting**: Limits the number of requests a user can make within a specified time frame, helping to protect against abuse and excessive traffic.
-- **Challenge Verification**: Presents a challenge to users who exceed the rate limit, allowing legitimate users to continue after successful verification.
-- **Durable Storage**: Utilizes Durable Objects for persistent storage of rate limit counters and timestamps, ensuring consistency across requests.
-- **Flexible Response**: Serves either HTML or JSON responses based on the client's `Accept` header, accommodating both browser-based and API clients.
+- **Rate Limiting**: Configurable token-bucket based rate limiting with automatic cooldown
+- **Challenge Verification**: Presents a Turnstile challenge to users who exceed the rate limit
+- **Request Replay**: Automatically captures and replays POST requests after successful verification
+- **Dynamic Configuration**: Routes and settings can be configured via KV or environment variables
+- **Structured Logging**: Comprehensive logging with Pino for better debugging and monitoring
+- **Modern Architecture**: Built with Hono framework for routing and middleware
 
-## Components
+## Architecture
 
-### `ChallengeStatusStorage` Durable Object
+The system is built on Cloudflare Workers with the following components:
 
-Responsible for tracking rate limit counters and timestamps for each client IP and `cf_clearance` cookie pair.
+### Core Components
 
-#### Endpoints
+- **Hono Framework**: For routing, middleware, and request handling
+- **Pino Logger**: For structured, level-based logging
+- **Zod**: For configuration schema validation
+- **Durable Objects**: For stateful operations like rate limiting and credential storage
+- **KV Storage**: For persistent configuration
 
-- `/getTimestampAndIP`: Retrieves the stored timestamp and IP address.
-- `/storeTimestampAndIP`: Stores or updates the timestamp and IP address.
-- `/deleteTimestampAndIP`: Deletes the stored timestamp and IP address.
-- `/checkRateLimit`: Checks if the client has exceeded the rate limit.
+### File Structure
 
-### `CredentialsStorage` Durable Object
+```
+src/
+├── durable-objects/        # Durable Object implementations
+│   ├── base-storage.js     # Base class with common functionality
+│   ├── challenge-status-storage.js
+│   └── credentials-storage.js
+├── middleware/             # Hono middleware
+│   ├── error-handler.js    # Global error handling
+│   ├── interstitial.js     # Challenge interstitial middleware
+│   └── logger.js           # Request logging middleware
+├── routes/                 # Route handlers
+│   ├── admin.js            # Admin API for configuration
+│   └── verify.js           # Challenge verification endpoints
+├── schemas/                # Zod schemas
+│   └── config.js           # Configuration schema and validation
+├── services/               # Business logic services
+│   ├── challenge-service.js
+│   ├── config-service.js
+│   ├── rate-limit-service.js
+│   ├── scheduled-service.js
+│   └── static-page-service.js
+├── utils/                  # Utility functions
+│   ├── logger.js           # Logger configuration
+│   ├── route-matcher.js    # Route pattern matching
+│   └── utils.js            # General utilities
+└── index.mjs               # Main entry point
+```
 
-Manages encrypted storage of sensitive data, such as credentials or verification details.
+## Configuration
 
-#### Endpoints
+The system can be configured through the KV storage or environment variables. Configuration includes:
 
-- `/store`: Encrypts and stores data.
-- `/retrieve`: Decrypts and retrieves stored data, then deletes it from storage.
+### Route Configuration
 
-### Main Worker Script
+Routes that should be protected by the interstitial are configurable:
 
-Handles incoming requests, directing them to the appropriate Durable Object or function based on the request path.
+```json
+{
+  "routes": [
+    {
+      "pattern": "/api/auth/login",
+      "methods": ["POST"],
+      "rateLimit": {
+        "maxTokens": 5,
+        "refillRate": 5,
+        "refillTime": 60000
+      }
+    },
+    {
+      "pattern": "/login",
+      "methods": ["GET", "POST"]
+    }
+  ],
+  "rateLimit": {
+    "maxTokens": 5,
+    "refillRate": 5,
+    "refillTime": 60000
+  },
+  "challengeValidityTime": 150000
+}
+```
 
-#### Functions
+### Route Pattern Matching
 
-- `getCfClearanceValue`: Extracts the `cf_clearance` cookie value from the request.
-- `handleLoginRequest`: Processes login requests, checking rate limits and serving challenges as necessary.
-- `handleGetLogin` and `handlePostLogin`: Handle specific login request methods, verifying challenges or storing login attempts.
-- `handleVerifyRequest`: Processes challenge verification responses.
-- `serveChallengePage`: Serves the challenge page to the client, with logic to respond with JSON for non-browser clients.
-- `serveRateLimitPage`: Informs the client they have exceeded the rate limit, with logic to respond with JSON for non-browser clients.
+Routes can be defined with glob-style patterns:
 
-## Usage
+- `/api/auth/login` - Exact match
+- `/api/*` - Match anything under `/api/` (single level)
+- `/admin/**` - Match anything under `/admin/` (multiple levels)
 
-1. **Rate Limit Checking**: Upon receiving a request, the system checks if the client has exceeded their rate limit using the `/checkRateLimit` endpoint of the `ChallengeStatusStorage` Durable Object.
-2. **Serving Challenges**: If the rate limit is exceeded, the client is served a challenge page (or JSON message for API clients) to verify themselves.
-3. **Verification and Access**: After successful verification, the client's rate limit counter is reset, allowing them to continue making requests.
+### Environment Variables
+
+- `MAX_TOKENS`: Maximum number of tokens for rate limiting (default: 5)
+- `REFILL_RATE`: Number of tokens to refill (default: 5)
+- `REFILL_TIME`: Time in milliseconds between refills (default: 60000)
+- `TIME_TO_CHALLENGE`: Time in milliseconds that a challenge is valid (default: 150000)
+- `SITE_KEY`: Cloudflare Turnstile site key
+- `SECRET_KEY`: Cloudflare Turnstile secret key
+- `ADMIN_PASSWORD`: Password for admin API access
+
+## Administration
+
+The system includes an admin API for managing configuration:
+
+- `GET /admin/config` - Get the current configuration
+- `PUT /admin/config` - Update the configuration
+
+Admin endpoints are protected with basic authentication.
+
+## Rate Limiting
+
+Rate limiting is implemented using a token bucket algorithm:
+
+1. Each client (identified by IP + Cloudflare clearance cookie) has a bucket of tokens
+2. Each request consumes one token from the bucket
+3. Tokens are refilled at a configurable rate
+4. When a client runs out of tokens, they must complete a Turnstile challenge
+
+## Challenge Flow
+
+1. User makes a request to a protected endpoint
+2. If they've exceeded their rate limit, they're presented with a Turnstile challenge
+3. Upon successful verification, the original request is replayed automatically
+4. For POST requests, the original request body and headers are preserved
 
 ## Deployment
 
-1. Deploy the Durable Objects (`ChallengeStatusStorage` and `CredentialsStorage`) to your Cloudflare Workers environment.
-2. Deploy the main worker script, ensuring it's configured to route requests to the appropriate Durable Object or function based on the URL path.
-3. Configure rate limit settings (max tokens, refill rate, and refill time) as needed for your application's requirements.
+1. Create a KV namespace for configuration:
+   ```
+   wrangler kv:namespace create CONFIG_KV
+   ```
 
-## Security Considerations
+2. Update the `wrangler.jsonc` file with your KV namespace ID
 
-- Ensure that the challenge mechanism is robust and capable of distinguishing between legitimate users and automated traffic.
-- Regularly rotate the encryption key used by `CredentialsStorage` to secure stored data.
-- Monitor for unusual patterns of traffic or verification attempts that may indicate attempts to bypass the rate limiting system.
+3. Set the required secrets:
+   ```
+   wrangler secret put SITE_KEY
+   wrangler secret put SECRET_KEY
+   wrangler secret put ADMIN_PASSWORD
+   ```
 
-## Limitations
+4. Deploy the worker:
+   ```
+   npm run deploy
+   ```
 
-- **Client-side JS**: This is still required if the login endpoint is an API endpoint, form is rendered by JS, therefore no strict HTML forms that can be used/manipulated.
+## Local Development
 
----
+1. Install dependencies:
+   ```
+   npm install
+   ```
 
-*README Generated by Phind cause I'm lazy*
+2. Run locally:
+   ```
+   npm start
+   ```
+
+## License
+
+MIT
