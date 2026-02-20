@@ -1,0 +1,73 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "turnstile-interstitial",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "25f21f141824546aa72c74451a11b419",
+
+  // Route configuration
+  "routes": [
+    {
+      "pattern": "file.erfianugrah.com/*",
+      "custom_domain": false,
+      "zone_id": "3f2c4daa43d5920f313654a873b31d06"
+    }
+  ],
+
+  // Secrets (set via `wrangler secret put`):
+  // SITE_KEY
+  // SECRET_KEY
+
+  "vars": {
+    // Route protection — comma-separated path prefixes, or "/*" for all routes
+    "PROTECTED_PATHS": "/login",
+    // Path prefix for POST credential storage (encrypted login payloads)
+    "CREDENTIAL_STORE_PATH": "/api/login",
+    // Path for the Turnstile verification callback
+    "VERIFY_PATH": "/verify",
+
+    // Rate limiting
+    "MAX_TOKENS": "5",
+    "REFILL_RATE": "5",
+    "REFILL_TIME": "60000",
+
+    // Challenge validity window (ms)
+    "TIME_TO_CHALLENGE": "150000",
+
+    // Credential storage limits
+    "MAX_CREDENTIAL_BODY_SIZE": "65536",
+    "CREDENTIAL_TTL": "300000"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHALLENGE_STATUS",
+        "class_name": "ChallengeStatusStorage"
+      },
+      {
+        "name": "CREDENTIALS_STORAGE",
+        "class_name": "CredentialsStorage"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["ChallengeStatusStorage"]
+    },
+    {
+      "tag": "v2",
+      "new_classes": ["CredentialsStorage"]
+    }
+    // Note: v3 and remove_rate_limiter migrations (deleted_classes: RateLimiter)
+    // were applied in production and are no longer needed in config.
+    // They are kept here as comments for historical reference.
+  ],
+
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  }
+}
