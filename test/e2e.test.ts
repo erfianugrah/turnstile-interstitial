@@ -8,13 +8,16 @@ import worker from "../src/index";
 import {
   sanitizeUrl,
   hashValue,
-  getCfClearanceValue,
+  getClearanceCookie,
   getClientIP,
   generateEncryptionKey,
   exportKey,
   importKey,
   encryptData,
   decryptData,
+  generateClearanceCookie,
+  verifyClearanceCookie,
+  buildSetCookieHeader,
 } from "../src/utils";
 import { serveChallengePage, serveRateLimitPage } from "../src/staticpages";
 import { getProtectedPaths, isProtectedPath } from "../src/index";
@@ -37,6 +40,10 @@ async function workerFetch(
   return SELF.fetch(`https://file.erfianugrah.com${path}`, init);
 }
 
+// Test secret key matching vitest.config.ts miniflare bindings
+const TEST_SECRET_KEY = "test-secret-key";
+const TEST_IP = "1.2.3.4";
+
 // ---------------------------------------------------------------------------
 // Basic routing
 // ---------------------------------------------------------------------------
@@ -53,7 +60,7 @@ describe("Worker routing", () => {
     }
   });
 
-  it("serves challenge page for GET /login without cf_clearance", async () => {
+  it("serves challenge page for GET /login without clearance cookie", async () => {
     const resp = await workerFetch("/login", {
       headers: { Accept: "text/html" },
     });
@@ -85,6 +92,89 @@ describe("Worker routing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Clearance cookie — generation, verification, extraction
+// ---------------------------------------------------------------------------
+
+describe("Clearance cookie", () => {
+  it("generateClearanceCookie produces a payload.signature format", async () => {
+    const cookie = await generateClearanceCookie(TEST_SECRET_KEY, TEST_IP);
+    expect(cookie).toContain(".");
+    const parts = cookie.split(".");
+    expect(parts.length).toBe(2);
+    // First part is base64-encoded JSON
+    const payload = JSON.parse(atob(parts[0]));
+    expect(payload.ip).toBe(TEST_IP);
+    expect(typeof payload.timestamp).toBe("number");
+    // Second part is a hex HMAC signature (64 hex chars for SHA-256)
+    expect(parts[1]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("verifyClearanceCookie validates a correctly signed cookie", async () => {
+    const cookie = await generateClearanceCookie(TEST_SECRET_KEY, TEST_IP);
+    const payload = await verifyClearanceCookie(TEST_SECRET_KEY, cookie);
+    expect(payload).not.toBeNull();
+    expect(payload!.ip).toBe(TEST_IP);
+    expect(payload!.timestamp).toBeGreaterThan(0);
+  });
+
+  it("verifyClearanceCookie rejects tampered payload", async () => {
+    const cookie = await generateClearanceCookie(TEST_SECRET_KEY, TEST_IP);
+    const [_payload, signature] = cookie.split(".");
+    // Tamper with the payload
+    const tamperedPayload = btoa(JSON.stringify({ ip: "6.6.6.6", timestamp: Date.now() }));
+    const tampered = `${tamperedPayload}.${signature}`;
+    const result = await verifyClearanceCookie(TEST_SECRET_KEY, tampered);
+    expect(result).toBeNull();
+  });
+
+  it("verifyClearanceCookie rejects tampered signature", async () => {
+    const cookie = await generateClearanceCookie(TEST_SECRET_KEY, TEST_IP);
+    const [payload, _signature] = cookie.split(".");
+    const tampered = `${payload}.${"a".repeat(64)}`;
+    const result = await verifyClearanceCookie(TEST_SECRET_KEY, tampered);
+    expect(result).toBeNull();
+  });
+
+  it("verifyClearanceCookie rejects cookie signed with wrong key", async () => {
+    const cookie = await generateClearanceCookie("wrong-secret-key", TEST_IP);
+    const result = await verifyClearanceCookie(TEST_SECRET_KEY, cookie);
+    expect(result).toBeNull();
+  });
+
+  it("verifyClearanceCookie rejects malformed cookie (no dot)", async () => {
+    const result = await verifyClearanceCookie(TEST_SECRET_KEY, "nodothere");
+    expect(result).toBeNull();
+  });
+
+  it("verifyClearanceCookie rejects cookie with invalid base64 payload", async () => {
+    const result = await verifyClearanceCookie(TEST_SECRET_KEY, "!!!invalid!!!.abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234");
+    expect(result).toBeNull();
+  });
+
+  it("getClearanceCookie extracts turnstile_clearance from Cookie header", () => {
+    const req = new Request("https://example.com", {
+      headers: { Cookie: "other=1; turnstile_clearance=abc123; another=2" },
+    });
+    expect(getClearanceCookie(req)).toBe("abc123");
+  });
+
+  it("getClearanceCookie returns null when cookie absent", () => {
+    const req = new Request("https://example.com");
+    expect(getClearanceCookie(req)).toBeNull();
+  });
+
+  it("buildSetCookieHeader includes correct attributes", () => {
+    const header = buildSetCookieHeader("test-value", 150);
+    expect(header).toContain("turnstile_clearance=test-value");
+    expect(header).toContain("Path=/");
+    expect(header).toContain("HttpOnly");
+    expect(header).toContain("Secure");
+    expect(header).toContain("SameSite=Lax");
+    expect(header).toContain("Max-Age=150");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Verify endpoint — uses test secret key so Turnstile API returns failure.
 // We validate that our input checks run before the API call.
 // ---------------------------------------------------------------------------
@@ -102,7 +192,32 @@ describe("POST /verify", () => {
     expect(json.error).toBe("Missing Turnstile token");
   });
 
-  it("returns error for form with token but invalid secret", async () => {
+  it("returns 400 for form with token but missing originalUrl", async () => {
+    const formData = new FormData();
+    formData.append("cf-turnstile-response", "fake-token");
+    const resp = await workerFetch("/verify", {
+      method: "POST",
+      body: formData,
+    });
+    expect(resp.status).toBe(400);
+    const json = await resp.json<{ error: string }>();
+    expect(json.error).toBe("Missing original URL");
+  });
+
+  it("returns 400 for form with token but invalid originalUrl protocol", async () => {
+    const formData = new FormData();
+    formData.append("cf-turnstile-response", "fake-token");
+    formData.append("originalUrl", "javascript:alert(1)");
+    const resp = await workerFetch("/verify", {
+      method: "POST",
+      body: formData,
+    });
+    expect(resp.status).toBe(400);
+    const json = await resp.json<{ error: string }>();
+    expect(json.error).toBe("Invalid original URL");
+  });
+
+  it("returns error for form with token but invalid secret (Turnstile rejects)", async () => {
     const formData = new FormData();
     formData.append("cf-turnstile-response", "fake-token");
     formData.append("originalUrl", "https://file.erfianugrah.com/login");
@@ -134,81 +249,17 @@ describe("XSS protection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ChallengeStatusStorage Durable Object
+// ChallengeStatusStorage Durable Object — rate limiting only
 // ---------------------------------------------------------------------------
 
 describe("ChallengeStatusStorage DO", () => {
-  it("stores and retrieves timestamp and IP", async () => {
-    const id = env.CHALLENGE_STATUS.idFromName("test-user-1");
-    const stub = env.CHALLENGE_STATUS.get(id);
-
-    await runInDO(stub, async (instance) => {
-      const storeResp = await instance.fetch(
-        new Request(
-          "https://challengestorage.internal/storeTimestampAndIP",
-          { headers: { "CF-Connecting-IP": "1.2.3.4" } },
-        ),
-      );
-      expect(storeResp.status).toBe(200);
-
-      const getResp = await instance.fetch(
-        new Request("https://challengestorage.internal/getTimestampAndIP"),
-      );
-      expect(getResp.status).toBe(200);
-      const data = await getResp.json<{ timestamp: number; ip: string }>();
-      expect(data.ip).toBe("1.2.3.4");
-      expect(data.timestamp).toBeGreaterThan(0);
-    });
-  });
-
-  it("returns 404 when no timestamp stored", async () => {
-    const id = env.CHALLENGE_STATUS.idFromName("nonexistent-user");
-    const stub = env.CHALLENGE_STATUS.get(id);
-
-    await runInDO(stub, async (instance) => {
-      const resp = await instance.fetch(
-        new Request("https://challengestorage.internal/getTimestampAndIP"),
-      );
-      expect(resp.status).toBe(404);
-    });
-  });
-
-  it("deletes timestamp and IP", async () => {
-    const id = env.CHALLENGE_STATUS.idFromName("test-delete-user");
-    const stub = env.CHALLENGE_STATUS.get(id);
-
-    await runInDO(stub, async (instance) => {
-      await instance.fetch(
-        new Request(
-          "https://challengestorage.internal/storeTimestampAndIP",
-          { headers: { "CF-Connecting-IP": "5.6.7.8" } },
-        ),
-      );
-
-      const delResp = await instance.fetch(
-        new Request(
-          "https://challengestorage.internal/deleteTimestampAndIP",
-          { method: "POST" },
-        ),
-      );
-      expect(delResp.status).toBe(200);
-
-      const getResp = await instance.fetch(
-        new Request("https://challengestorage.internal/getTimestampAndIP"),
-      );
-      expect(getResp.status).toBe(404);
-    });
-  });
-
   it("rate limits after max tokens are exhausted", async () => {
     const id = env.CHALLENGE_STATUS.idFromName("rate-limit-test");
     const stub = env.CHALLENGE_STATUS.get(id);
 
     await runInDO(stub, async (instance) => {
       // maxTokens=5, first request creates with tokens=4 (one consumed)
-      // So requests 1-5 succeed (tokens: 4,3,2,1,0 after refill logic)
-      // Actually: first call → tokens=4, then calls 2-5 decrement: 3,2,1,0
-      // When tokens=0, next call is rate limited
+      // So requests 1-5 succeed, then request 6 is rate limited
       let lastStatus = 200;
       for (let i = 0; i < 10; i++) {
         const resp = await instance.fetch(
@@ -250,7 +301,7 @@ describe("ChallengeStatusStorage DO", () => {
               method: "POST",
               headers: {
                 "CF-Connecting-IP": "10.0.0.99",
-                Cookie: `cf_clearance=cookie-${i}`,
+                Cookie: `turnstile_clearance=cookie-${i}`,
               },
             },
           ),
@@ -266,6 +317,37 @@ describe("ChallengeStatusStorage DO", () => {
     });
   });
 
+  it("allows different IPs independent rate limit buckets", async () => {
+    const id = env.CHALLENGE_STATUS.idFromName("rateLimiter-multi-ip");
+    const stub = env.CHALLENGE_STATUS.get(id);
+
+    await runInDO(stub, async (instance) => {
+      // IP A: first request should be allowed
+      const respA = await instance.fetch(
+        new Request(
+          "https://challengestorage.internal/checkRateLimit",
+          {
+            method: "POST",
+            headers: { "CF-Connecting-IP": "192.168.1.1" },
+          },
+        ),
+      );
+      expect(respA.status).toBe(200);
+
+      // IP B: first request should also be allowed (separate bucket)
+      const respB = await instance.fetch(
+        new Request(
+          "https://challengestorage.internal/checkRateLimit",
+          {
+            method: "POST",
+            headers: { "CF-Connecting-IP": "192.168.1.2" },
+          },
+        ),
+      );
+      expect(respB.status).toBe(200);
+    });
+  });
+
   it("returns 404 for unknown DO paths", async () => {
     const id = env.CHALLENGE_STATUS.idFromName("test-unknown");
     const stub = env.CHALLENGE_STATUS.get(id);
@@ -275,6 +357,31 @@ describe("ChallengeStatusStorage DO", () => {
         new Request("https://challengestorage.internal/unknown"),
       );
       expect(resp.status).toBe(404);
+    });
+  });
+
+  it("returns 404 for removed timestamp/IP endpoints", async () => {
+    const id = env.CHALLENGE_STATUS.idFromName("test-removed-endpoints");
+    const stub = env.CHALLENGE_STATUS.get(id);
+
+    await runInDO(stub, async (instance) => {
+      // These endpoints were removed — DO only supports /checkRateLimit now
+      const storeResp = await instance.fetch(
+        new Request("https://challengestorage.internal/storeTimestampAndIP"),
+      );
+      expect(storeResp.status).toBe(404);
+
+      const getResp = await instance.fetch(
+        new Request("https://challengestorage.internal/getTimestampAndIP"),
+      );
+      expect(getResp.status).toBe(404);
+
+      const delResp = await instance.fetch(
+        new Request("https://challengestorage.internal/deleteTimestampAndIP", {
+          method: "POST",
+        }),
+      );
+      expect(delResp.status).toBe(404);
     });
   });
 });
@@ -425,18 +532,6 @@ describe("Utility functions", () => {
     expect(h1).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("getCfClearanceValue extracts cookie value", () => {
-    const req = new Request("https://example.com", {
-      headers: { Cookie: "other=1; cf_clearance=abc123; another=2" },
-    });
-    expect(getCfClearanceValue(req)).toBe("abc123");
-  });
-
-  it("getCfClearanceValue returns null when cookie absent", () => {
-    const req = new Request("https://example.com");
-    expect(getCfClearanceValue(req)).toBeNull();
-  });
-
   it("getClientIP returns CF-Connecting-IP header", () => {
     const req = new Request("https://example.com", {
       headers: { "CF-Connecting-IP": "9.8.7.6" },
@@ -521,7 +616,6 @@ describe("Route protection configuration", () => {
 
   it("worker challenges /admin when PROTECTED_PATHS includes it", async () => {
     // The test env has PROTECTED_PATHS="/login", so /admin should pass through.
-    // We test this by confirming /admin does NOT get the challenge page.
     try {
       const resp = await workerFetch("/admin", {
         headers: { Accept: "text/html" },

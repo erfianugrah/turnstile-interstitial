@@ -3,10 +3,13 @@ import {
   encryptData,
   exportKey,
   generateEncryptionKey,
-  getCfClearanceValue,
+  getClearanceCookie,
   getClientIP,
   hashValue,
   importKey,
+  generateClearanceCookie,
+  verifyClearanceCookie,
+  buildSetCookieHeader,
 } from "./utils";
 import { serveChallengePage, serveRateLimitPage } from "./staticpages";
 import { verifyChallenge } from "./siteverify";
@@ -15,7 +18,6 @@ import type {
   RateLimitConfig,
   RateLimitInfo,
   StoredCredentials,
-  TimestampAndIP,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -41,9 +43,6 @@ class BaseStorage implements DurableObject {
     return new Response("Not found", { status: 404 });
   }
 
-  /**
-   * Cleanup expired data in batches to avoid iterating all keys in one shot.
-   */
   async cleanupExpiredData(expirationTime: number): Promise<void> {
     const currentTime = Date.now();
     let cursor: string | undefined;
@@ -70,22 +69,23 @@ class BaseStorage implements DurableObject {
             typeof data === "object" &&
             "lastAccess" in data &&
             typeof (data as { lastAccess: number }).lastAccess === "number" &&
-            currentTime - (data as { lastAccess: number }).lastAccess > expirationTime
+            currentTime - (data as { lastAccess: number }).lastAccess >
+              expirationTime
           ) {
             toDelete.push(key);
           }
-          // Also clean up storedAt-based entries (credentials)
           if (
             data &&
             typeof data === "object" &&
             "storedAt" in data &&
             typeof (data as { storedAt: number }).storedAt === "number" &&
-            currentTime - (data as { storedAt: number }).storedAt > expirationTime
+            currentTime - (data as { storedAt: number }).storedAt >
+              expirationTime
           ) {
             toDelete.push(key);
           }
         } catch {
-          // If the value can't be parsed, skip it
+          // skip unparseable values
         }
       }
 
@@ -100,7 +100,7 @@ class BaseStorage implements DurableObject {
 }
 
 // ---------------------------------------------------------------------------
-// ChallengeStatusStorage
+// ChallengeStatusStorage — rate limiting only
 // ---------------------------------------------------------------------------
 
 export class ChallengeStatusStorage extends BaseStorage {
@@ -121,44 +121,14 @@ export class ChallengeStatusStorage extends BaseStorage {
     const url = new URL(request.url);
     try {
       switch (url.pathname) {
-        case "/getTimestampAndIP": {
-          const data =
-            await this.state.storage.get<TimestampAndIP>("timestampAndIP");
-          if (!data) {
-            return new Response(
-              JSON.stringify({ error: "No data found" }),
-              { status: 404, headers: { "Content-Type": "application/json" } },
-            );
-          }
-          return new Response(JSON.stringify(data), {
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
-        case "/storeTimestampAndIP": {
-          const clientIP = getClientIP(request);
-          const timestampAndIP: TimestampAndIP = {
-            timestamp: Date.now(),
-            ip: clientIP,
-          };
-          await this.state.storage.put("timestampAndIP", timestampAndIP);
-          return new Response("Timestamp and IP stored");
-        }
-
-        case "/deleteTimestampAndIP": {
-          await this.state.storage.delete("timestampAndIP");
-          return new Response("Timestamp and IP deleted", { status: 200 });
-        }
-
-        case "/checkRateLimit": {
+        case "/checkRateLimit":
           return this.checkRateLimit(request);
-        }
-
         default:
           return new Response("Not found", { status: 404 });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message =
+        error instanceof Error ? error.message : "Unknown error";
       console.error(`Error handling request: ${message}`);
       return new Response(JSON.stringify({ error: message }), {
         status: 500,
@@ -168,12 +138,10 @@ export class ChallengeStatusStorage extends BaseStorage {
   }
 
   /**
-   * Rate limiter keyed by IP address (not cookie) to prevent bypass via cookie rotation.
-   * Uses token-bucket algorithm.
+   * Token-bucket rate limiter keyed by IP address.
    */
   private async checkRateLimit(request: Request): Promise<Response> {
     const clientIP = getClientIP(request);
-    // Key rate limit by IP only — cookie is attacker-controlled and can be rotated
     const identifier = await hashValue(clientIP);
 
     let rateLimitInfo =
@@ -181,7 +149,6 @@ export class ChallengeStatusStorage extends BaseStorage {
     const currentTime = Date.now();
 
     if (!rateLimitInfo) {
-      // First request: consume one token
       rateLimitInfo = {
         tokens: this.rateLimit.maxTokens - 1,
         nextAllowedRequest: currentTime + this.rateLimit.refillTime,
@@ -193,12 +160,10 @@ export class ChallengeStatusStorage extends BaseStorage {
 
     rateLimitInfo.lastAccess = currentTime;
 
-    // Refill tokens if the cooldown has passed
     if (currentTime >= rateLimitInfo.nextAllowedRequest) {
       rateLimitInfo.tokens = this.rateLimit.maxTokens;
     }
 
-    // Try to consume a token
     if (rateLimitInfo.tokens > 0) {
       rateLimitInfo.tokens--;
       rateLimitInfo.nextAllowedRequest =
@@ -207,7 +172,6 @@ export class ChallengeStatusStorage extends BaseStorage {
       return new Response("Allowed", { status: 200 });
     }
 
-    // No tokens left — rate limited
     await this.state.storage.put(identifier, rateLimitInfo);
     const cooldownEndTime = new Date(
       rateLimitInfo.nextAllowedRequest,
@@ -239,7 +203,6 @@ export class CredentialsStorage extends BaseStorage {
 
     try {
       if (url.pathname === "/store") {
-        // Enforce body size limit
         const maxSize = parseInt(
           this.env.MAX_CREDENTIAL_BODY_SIZE ||
             String(MAX_CREDENTIAL_BODY_SIZE_DEFAULT),
@@ -261,7 +224,6 @@ export class CredentialsStorage extends BaseStorage {
           );
         }
 
-        // Validate JSON
         try {
           JSON.parse(bodyText);
         } catch {
@@ -271,7 +233,6 @@ export class CredentialsStorage extends BaseStorage {
           );
         }
 
-        // Generate key, encrypt, and persist key alongside data
         const key = await generateEncryptionKey();
         const { encryptedData, iv } = await encryptData(key, bodyText);
         const exportedKey = await exportKey(key);
@@ -285,11 +246,7 @@ export class CredentialsStorage extends BaseStorage {
 
         await this.state.storage.put("encryptedCredentials", stored);
 
-        // Set an alarm to auto-expire credentials
-        const ttl = parseInt(
-          this.env.CREDENTIAL_TTL || "300000",
-          10,
-        );
+        const ttl = parseInt(this.env.CREDENTIAL_TTL || "300000", 10);
         await this.state.storage.setAlarm(Date.now() + ttl);
 
         return new Response("Credentials stored", { status: 200 });
@@ -307,7 +264,6 @@ export class CredentialsStorage extends BaseStorage {
           );
         }
 
-        // Check TTL
         const ttl = parseInt(this.env.CREDENTIAL_TTL || "300000", 10);
         if (Date.now() - stored.storedAt > ttl) {
           await this.state.storage.delete("encryptedCredentials");
@@ -324,7 +280,6 @@ export class CredentialsStorage extends BaseStorage {
           new Uint8Array(stored.iv),
         );
 
-        // Delete after single retrieval
         await this.state.storage.delete("encryptedCredentials");
 
         return new Response(decryptedData, {
@@ -335,7 +290,8 @@ export class CredentialsStorage extends BaseStorage {
 
       return new Response("Not found", { status: 404 });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message =
+        error instanceof Error ? error.message : "Unknown error";
       console.error(`CredentialsStorage error: ${message}`);
       return new Response(JSON.stringify({ error: message }), {
         status: 500,
@@ -344,9 +300,6 @@ export class CredentialsStorage extends BaseStorage {
     }
   }
 
-  /**
-   * Alarm handler: auto-expire credentials after TTL.
-   */
   async alarm(): Promise<void> {
     await this.state.storage.delete("encryptedCredentials");
   }
@@ -356,23 +309,27 @@ export class CredentialsStorage extends BaseStorage {
 // Route matching
 // ---------------------------------------------------------------------------
 
-/**
- * Parse PROTECTED_PATHS env var into an array of path prefixes.
- * Supports "/*" for all routes, or comma-separated prefixes like "/login,/admin".
- */
 export function getProtectedPaths(env: Env): string[] {
   const raw = (env.PROTECTED_PATHS || "/login").trim();
-  return raw.split(",").map((p) => p.trim()).filter(Boolean);
+  return raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
 }
 
-export function isProtectedPath(pathname: string, protectedPaths: string[]): boolean {
+export function isProtectedPath(
+  pathname: string,
+  protectedPaths: string[],
+): boolean {
   for (const prefix of protectedPaths) {
     if (prefix === "/*") return true;
-    if (pathname === prefix || pathname.startsWith(prefix + "/") || pathname.startsWith(prefix + "?")) {
+    if (
+      pathname === prefix ||
+      pathname.startsWith(prefix + "/") ||
+      pathname.startsWith(prefix + "?")
+    ) {
       return true;
     }
-    // Also match exact prefix (e.g. "/login" matches "/login")
-    if (pathname === prefix) return true;
   }
   return false;
 }
@@ -384,12 +341,11 @@ export function isProtectedPath(pathname: string, protectedPaths: string[]): boo
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const cfClearanceValue = getCfClearanceValue(request);
     const verifyPath = (env.VERIFY_PATH || "/verify").trim();
 
     // Verification endpoint — always active
     if (url.pathname.startsWith(verifyPath) && request.method === "POST") {
-      return handleVerifyRequest(request, env, cfClearanceValue);
+      return handleVerifyRequest(request, env);
     }
 
     // Check if this path is protected
@@ -402,9 +358,6 @@ export default {
     return fetch(request);
   },
 
-  /**
-   * Scheduled handler for daily cleanup of expired Durable Object data.
-   */
   async scheduled(
     _event: ScheduledEvent,
     env: Env,
@@ -412,9 +365,10 @@ export default {
   ): Promise<void> {
     ctx.waitUntil(
       (async () => {
-        // Clean up a well-known DO instance used by the rate limiter
-        const rateLimiterId = env.CHALLENGE_STATUS.idFromName("rateLimiter");
-        const rateLimiterStub = env.CHALLENGE_STATUS.get(rateLimiterId);
+        const rateLimiterId =
+          env.CHALLENGE_STATUS.idFromName("rateLimiter");
+        const rateLimiterStub =
+          env.CHALLENGE_STATUS.get(rateLimiterId);
         await rateLimiterStub.fetch(
           new Request("https://internal/cleanupExpiredData"),
         );
@@ -432,13 +386,15 @@ async function handleProtectedRequest(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
-  const cfClearance = getCfClearanceValue(request);
   const clientIP = getClientIP(request);
 
-  if (!cfClearance) {
+  // 1. Check for a valid signed clearance cookie
+  const clearanceValid = await verifyClearanceFromRequest(request, env);
+  if (!clearanceValid) {
     return serveChallengePage(env, request);
   }
 
+  // 2. Rate limit check (by IP)
   const rateLimitCheck = await checkRateLimit(env, clientIP);
   if (rateLimitCheck.status === 429) {
     const responseBody = await rateLimitCheck.json<{
@@ -453,47 +409,61 @@ async function handleProtectedRequest(
     return serveRateLimitPage(cooldownEndTime, request);
   }
 
-  // POST to the credential store path → encrypt and store credentials
-  const credentialStorePath = (env.CREDENTIAL_STORE_PATH || "/api/login").trim();
-  if (request.method === "POST" && url.pathname.startsWith(credentialStorePath)) {
-    return handlePostLogin(request, env, cfClearance);
+  // 3. POST to credential store path → encrypt and store
+  const credentialStorePath = (
+    env.CREDENTIAL_STORE_PATH || "/api/login"
+  ).trim();
+  if (
+    request.method === "POST" &&
+    url.pathname.startsWith(credentialStorePath)
+  ) {
+    return handlePostLogin(request, env);
   }
 
-  // All other methods (GET, etc.) → verify challenge, then proxy to origin
-  return handleGetProtected(request, env, cfClearance);
+  // 4. All other methods → proxy to origin
+  return fetch(request);
 }
 
-async function handleGetProtected(
+/**
+ * Handle POST /verify — validate Turnstile token, issue signed cookie, redirect.
+ */
+async function handleVerifyRequest(
   request: Request,
   env: Env,
-  cfClearanceValue: string,
 ): Promise<Response> {
-  const isVerified = await verifyChallengeStatus(
-    request,
-    env,
-    cfClearanceValue,
-  );
-  if (isVerified) {
-    return fetch(request);
+  const result = await verifyChallenge(request, env);
+
+  if (!result.success) {
+    return new Response(
+      JSON.stringify({ error: result.error }),
+      {
+        status: result.status,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
-  return serveChallengePage(env, request);
+
+  // Turnstile verification succeeded — generate signed clearance cookie
+  const clientIP = getClientIP(request);
+  const cookieValue = await generateClearanceCookie(env.SECRET_KEY, clientIP);
+  const challengeTTL = parseInt(env.TIME_TO_CHALLENGE || "150000", 10);
+  const maxAgeSec = Math.floor(challengeTTL / 1000);
+  const setCookie = buildSetCookieHeader(cookieValue, maxAgeSec);
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: result.originalUrl!,
+      "Set-Cookie": setCookie,
+      "Cache-Control": "no-store, max-age=0",
+    },
+  });
 }
 
 async function handlePostLogin(
   request: Request,
   env: Env,
-  cfClearanceValue: string,
 ): Promise<Response> {
-  const isVerified = await verifyChallengeStatus(
-    request,
-    env,
-    cfClearanceValue,
-  );
-  if (!isVerified) {
-    return serveChallengePage(env, request);
-  }
-
-  // Enforce body size limit before reading
   const maxSize = parseInt(
     env.MAX_CREDENTIAL_BODY_SIZE ||
       String(MAX_CREDENTIAL_BODY_SIZE_DEFAULT),
@@ -550,7 +520,7 @@ async function handlePostLogin(
 
   return new Response(
     JSON.stringify({
-      message: "Login attempt stored. Please complete the challenge if required.",
+      message: "Login attempt stored.",
       attemptId: loginAttemptId,
     }),
     {
@@ -560,89 +530,37 @@ async function handlePostLogin(
   );
 }
 
-async function handleVerifyRequest(
-  request: Request,
-  env: Env,
-  cfClearanceValue: string | null,
-): Promise<Response> {
-  const response = await verifyChallenge(request, env);
-  if (response.status === 302 && cfClearanceValue) {
-    const challengeStatusStorage = await getChallengeStatusStorage(
-      env,
-      cfClearanceValue,
-    );
-    await challengeStatusStorage.fetch(
-      new Request("https://challengestorage.internal/storeTimestampAndIP", {
-        headers: { "CF-Connecting-IP": getClientIP(request) },
-      }),
-    );
-  }
-  return response;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function getChallengeStatusStorage(
-  env: Env,
-  cfClearanceValue: string,
-): Promise<DurableObjectStub> {
-  const hashedCfClearanceValue = await hashValue(cfClearanceValue);
-  const challengeStatusStorageId =
-    env.CHALLENGE_STATUS.idFromName(hashedCfClearanceValue);
-  return env.CHALLENGE_STATUS.get(challengeStatusStorageId);
-}
-
-async function verifyChallengeStatus(
+/**
+ * Verify the signed clearance cookie from the request.
+ * Checks HMAC signature, IP binding, and timestamp expiry.
+ */
+async function verifyClearanceFromRequest(
   request: Request,
   env: Env,
-  cfClearanceValue: string | null,
 ): Promise<boolean> {
-  try {
-    if (!cfClearanceValue) {
-      return false;
-    }
+  const cookieValue = getClearanceCookie(request);
+  if (!cookieValue) return false;
 
-    const challengeStatusStorage = await getChallengeStatusStorage(
-      env,
-      cfClearanceValue,
-    );
-    const dataResponse = await challengeStatusStorage.fetch(
-      new Request("https://challengestorage.internal/getTimestampAndIP"),
-    );
+  const payload = await verifyClearanceCookie(env.SECRET_KEY, cookieValue);
+  if (!payload) return false;
 
-    if (!dataResponse.ok) {
-      return false;
-    }
+  // Check IP binding
+  const clientIP = getClientIP(request);
+  if (payload.ip !== clientIP) return false;
 
-    const data = await dataResponse.json<TimestampAndIP>();
-    const currentTime = Date.now();
-    const timeToChallenge = parseInt(env.TIME_TO_CHALLENGE || "150000", 10);
-    const timeDifference = currentTime - data.timestamp;
-    const isTimestampValid = timeDifference < timeToChallenge;
-    const isIPMatching = data.ip === getClientIP(request);
+  // Check expiry
+  const challengeTTL = parseInt(env.TIME_TO_CHALLENGE || "150000", 10);
+  if (Date.now() - payload.timestamp > challengeTTL) return false;
 
-    if (!isTimestampValid || !isIPMatching) {
-      await challengeStatusStorage.fetch(
-        new Request(
-          "https://challengestorage.internal/deleteTimestampAndIP",
-          { method: "POST" },
-        ),
-      );
-      return false;
-    }
-
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error(`Verification error: ${message}`);
-    return false;
-  }
+  return true;
 }
 
 /**
- * Rate limit check keyed by IP only (prevents bypass via cookie rotation).
+ * Rate limit check keyed by IP only.
  */
 async function checkRateLimit(
   env: Env,

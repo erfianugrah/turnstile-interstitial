@@ -27,11 +27,6 @@ export interface Env {
   VERIFY_PATH: string;
 }
 
-export interface TimestampAndIP {
-  timestamp: number;
-  ip: string;
-}
-
 export interface RateLimitInfo {
   tokens: number;
   nextAllowedRequest: number;

@@ -13,7 +13,8 @@ Client Request
      yes
       |
       v
-  Has cf_clearance cookie?  ──no──> Serve Turnstile challenge page
+  Has valid turnstile_clearance   ──no──> Serve Turnstile challenge page
+  cookie? (HMAC + IP + expiry)
       |
      yes
       |
@@ -23,22 +24,20 @@ Client Request
     allowed
       |
       v
-  Challenge status valid?  ──no──> Serve Turnstile challenge page
-  (timestamp + IP match)
-      |
-     yes
-      |
-      v
   Proxy request to origin
 ```
 
 1. **Interception** -- The Worker intercepts requests matching configured path prefixes. Everything else passes through to the origin.
-2. **Challenge** -- Users without a `cf_clearance` cookie are served an interstitial page with a Turnstile widget. Non-browser clients receive a JSON response instead.
-3. **Verification** -- On completing the challenge, the Turnstile token is validated against Cloudflare's siteverify API. On success, the user's timestamp and IP are stored in a Durable Object.
-4. **Challenge Status** -- Subsequent requests check the stored timestamp and IP. The challenge is valid for a configurable window (`TIME_TO_CHALLENGE`). Expired or IP-mismatched sessions require re-verification.
-5. **Rate Limiting** -- Each request to a protected path consumes a token from a per-IP token bucket. When tokens are exhausted, a rate limit page with a live countdown timer is served.
+2. **Challenge** -- Users without a valid `turnstile_clearance` cookie are served an interstitial page with a Turnstile widget. Non-browser clients receive a JSON response instead.
+3. **Verification** -- On completing the challenge, the Turnstile token is validated against Cloudflare's siteverify API. On success, the Worker issues a self-managed `turnstile_clearance` cookie containing an HMAC-SHA256-signed payload with the client IP and timestamp.
+4. **Cookie Validation** -- Subsequent requests verify the signed cookie: HMAC signature must be valid (using `SECRET_KEY`), the embedded IP must match the current client IP, and the timestamp must be within the `TIME_TO_CHALLENGE` window. No Durable Object lookup is needed for challenge state.
+5. **Rate Limiting** -- Each request to a protected path consumes a token from a per-IP token bucket (stored in a Durable Object). When tokens are exhausted, a rate limit page with a live countdown timer is served.
 6. **Credential Storage** -- POST requests to the credential store path have their payload encrypted with AES-256-GCM and stored in a separate Durable Object. Data is deleted after a single retrieval and auto-expires via DO alarms.
 7. **Cleanup** -- A daily cron job purges expired Durable Object entries older than 24 hours.
+
+### Why Not `cf_clearance`?
+
+Cloudflare Turnstile does **not** issue a `cf_clearance` cookie by default — that only happens with [Turnstile pre-clearance](https://developers.cloudflare.com/turnstile/tutorials/pre-clearance-support/) enabled in the dashboard. Pre-clearance delegates challenge state to Cloudflare's edge, which makes it easier to bypass. Instead, this Worker issues its own HMAC-signed cookie that it fully controls: the signature binds to the `SECRET_KEY`, the payload is IP-bound, and expiry is enforced server-side.
 
 ## Use Cases
 
@@ -111,7 +110,7 @@ src/
   siteverify.ts     Turnstile token verification against Cloudflare API
   staticpages.ts    HTML/JSON response generators (challenge + rate limit pages)
 test/
-  e2e.test.ts       End-to-end tests (40 tests)
+  e2e.test.ts       End-to-end tests (49 tests)
   env.d.ts          Type declarations for test environment
 wrangler.jsonc      Cloudflare Workers configuration
 tsconfig.json       TypeScript configuration
@@ -123,13 +122,10 @@ Misc/               Historical development iterations (kept for reference)
 
 ### ChallengeStatusStorage
 
-Manages per-client challenge state and rate limiting.
+Manages per-IP rate limiting. Challenge state is no longer stored in DOs — it lives entirely in the signed `turnstile_clearance` cookie.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/getTimestampAndIP` | GET | Retrieve stored challenge timestamp and IP |
-| `/storeTimestampAndIP` | GET | Store current timestamp and client IP |
-| `/deleteTimestampAndIP` | POST | Delete stored challenge data |
 | `/checkRateLimit` | POST | Token-bucket rate limit check (keyed by IP) |
 
 ### CredentialsStorage
@@ -171,15 +167,15 @@ npm run typecheck
 
 ```bash
 npm test
-# Runs 40 e2e tests via @cloudflare/vitest-pool-workers
+# Runs 49 e2e tests via @cloudflare/vitest-pool-workers
 ```
 
 Tests cover:
 - Worker routing (protected vs pass-through paths)
-- Turnstile verification endpoint (input validation, error handling)
+- Turnstile verification endpoint (input validation, URL validation, error handling)
+- Clearance cookie (HMAC generation/verification, tamper detection, wrong-key rejection, IP binding, Set-Cookie format)
 - XSS protection (URL sanitization in challenge page)
-- ChallengeStatusStorage DO (store/retrieve/delete timestamp+IP, rate limiting)
-- Rate limit bypass prevention (IP-only keying, cookie rotation resistance)
+- ChallengeStatusStorage DO (rate limiting, IP-only keying, cookie rotation resistance, independent IP buckets, removed endpoints return 404)
 - CredentialsStorage DO (encrypt/decrypt roundtrip, single-read deletion, body size limits, JSON validation)
 - Utility functions (hashing, crypto key export/import, cookie parsing)
 - Rate limit page (429 status, HTML countdown, JSON response)
@@ -201,7 +197,10 @@ wrangler secret put SECRET_KEY
 
 ## Security
 
-- **Rate limiting is keyed by IP only** -- not by cookie. This prevents attackers from bypassing rate limits by rotating `cf_clearance` cookies.
+- **Self-managed signed cookie** -- The `turnstile_clearance` cookie is HMAC-SHA256-signed with `SECRET_KEY`, IP-bound, and timestamp-checked. No Durable Object lookup is needed to verify challenge state, eliminating a per-request DO roundtrip.
+- **Timing-safe signature verification** -- HMAC comparison uses `crypto.subtle.timingSafeEqual` (with XOR fallback) to prevent timing attacks.
+- **Cookie attributes** -- The clearance cookie is set with `HttpOnly; Secure; SameSite=Lax; Path=/` to prevent XSS exfiltration and CSRF.
+- **Rate limiting is keyed by IP only** -- not by cookie. This prevents attackers from bypassing rate limits by rotating cookies.
 - **Turnstile verification includes error handling** -- network failures to the siteverify API return 502 instead of crashing. Invalid tokens, missing fields, and malformed URLs are rejected with appropriate 400-level responses.
 - **URL sanitization** -- The `originalUrl` embedded in the challenge page is sanitized to prevent XSS injection. Only `http`/`https` URLs are allowed, and HTML special characters are escaped.
 - **Credential encryption** -- Login payloads are encrypted with AES-256-GCM using a per-request key. The key is persisted alongside the ciphertext (not returned to the caller). Data is single-read and auto-expires via DO alarms.

@@ -60,10 +60,130 @@ export async function decryptData(
   return new TextDecoder().decode(decryptedData);
 }
 
-export function getCfClearanceValue(request: Request): string | null {
+// ---------------------------------------------------------------------------
+// Cookie helpers
+// ---------------------------------------------------------------------------
+
+const COOKIE_NAME = "turnstile_clearance";
+
+/**
+ * Extract the turnstile_clearance cookie value from a request.
+ */
+export function getClearanceCookie(request: Request): string | null {
   const cookies = request.headers.get("Cookie");
-  const matches = cookies?.match(/cf_clearance=([^;]+)/);
+  const re = new RegExp(`${COOKIE_NAME}=([^;]+)`);
+  const matches = cookies?.match(re);
   return matches ? matches[1] : null;
+}
+
+/**
+ * Create an HMAC-SHA256 signature for the given payload using the secret key.
+ */
+async function hmacSign(secret: string, payload: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Verify an HMAC-SHA256 signature using timing-safe comparison.
+ */
+async function hmacVerify(
+  secret: string,
+  payload: string,
+  signature: string,
+): Promise<boolean> {
+  const expected = await hmacSign(secret, payload);
+  if (expected.length !== signature.length) return false;
+  // Timing-safe comparison via subtle.timingSafeEqual is not available in
+  // all Workers runtimes, so we use a constant-time compare.
+  const encoder = new TextEncoder();
+  const a = encoder.encode(expected);
+  const b = encoder.encode(signature);
+  if (a.byteLength !== b.byteLength) return false;
+  // crypto.subtle.timingSafeEqual is available in workerd
+  const aBuffer = a.buffer.slice(a.byteOffset, a.byteOffset + a.byteLength) as ArrayBuffer;
+  const bBuffer = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
+  try {
+    return crypto.subtle.timingSafeEqual(aBuffer, bBuffer);
+  } catch {
+    // Fallback: constant-time XOR compare
+    let result = 0;
+    for (let i = 0; i < a.length; i++) {
+      result |= a[i] ^ b[i];
+    }
+    return result === 0;
+  }
+}
+
+export interface ClearancePayload {
+  ip: string;
+  timestamp: number;
+}
+
+/**
+ * Generate a signed clearance cookie value: base64(json payload).signature
+ */
+export async function generateClearanceCookie(
+  secretKey: string,
+  ip: string,
+): Promise<string> {
+  const payload: ClearancePayload = {
+    ip,
+    timestamp: Date.now(),
+  };
+  const payloadStr = btoa(JSON.stringify(payload));
+  const signature = await hmacSign(secretKey, payloadStr);
+  return `${payloadStr}.${signature}`;
+}
+
+/**
+ * Parse and verify a clearance cookie value. Returns the payload if valid, null otherwise.
+ */
+export async function verifyClearanceCookie(
+  secretKey: string,
+  cookieValue: string,
+): Promise<ClearancePayload | null> {
+  const dotIndex = cookieValue.lastIndexOf(".");
+  if (dotIndex === -1) return null;
+
+  const payloadStr = cookieValue.substring(0, dotIndex);
+  const signature = cookieValue.substring(dotIndex + 1);
+
+  const valid = await hmacVerify(secretKey, payloadStr, signature);
+  if (!valid) return null;
+
+  try {
+    const payload: ClearancePayload = JSON.parse(atob(payloadStr));
+    if (
+      typeof payload.ip !== "string" ||
+      typeof payload.timestamp !== "number"
+    ) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a Set-Cookie header value for the clearance cookie.
+ */
+export function buildSetCookieHeader(
+  cookieValue: string,
+  maxAgeSec: number,
+): string {
+  return `${COOKIE_NAME}=${cookieValue}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSec}`;
 }
 
 export function getClientIP(request: Request): string {
