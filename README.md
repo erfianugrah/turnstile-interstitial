@@ -1,71 +1,216 @@
 # Turnstile Interstitial
 
-This system is designed to enforce rate limiting on web requests while providing a mechanism for users to verify themselves via a challenge when they exceed the rate limit. It utilizes Cloudflare Workers and Durable Objects to track request counts and cooldown periods for clients based on their IP address and `cf_clearance` cookie.
+A Cloudflare Worker that protects routes with [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) challenges, token-bucket rate limiting, and encrypted credential storage. Built on [Durable Objects](https://developers.cloudflare.com/durable-objects/) for persistent state with zero external dependencies.
 
-## Features
+## How It Works
 
-- **Rate Limiting**: Limits the number of requests a user can make within a specified time frame, helping to protect against abuse and excessive traffic.
-- **Challenge Verification**: Presents a challenge to users who exceed the rate limit, allowing legitimate users to continue after successful verification.
-- **Durable Storage**: Utilizes Durable Objects for persistent storage of rate limit counters and timestamps, ensuring consistency across requests.
-- **Flexible Response**: Serves either HTML or JSON responses based on the client's `Accept` header, accommodating both browser-based and API clients.
+```
+Client Request
+      |
+      v
+  Is this a protected path?  ──no──> Pass through to origin
+      |
+     yes
+      |
+      v
+  Has cf_clearance cookie?  ──no──> Serve Turnstile challenge page
+      |
+     yes
+      |
+      v
+  Rate limit check (by IP)  ──exceeded──> Serve rate limit page with countdown
+      |
+    allowed
+      |
+      v
+  Challenge status valid?  ──no──> Serve Turnstile challenge page
+  (timestamp + IP match)
+      |
+     yes
+      |
+      v
+  Proxy request to origin
+```
 
-## Components
+1. **Interception** -- The Worker intercepts requests matching configured path prefixes. Everything else passes through to the origin.
+2. **Challenge** -- Users without a `cf_clearance` cookie are served an interstitial page with a Turnstile widget. Non-browser clients receive a JSON response instead.
+3. **Verification** -- On completing the challenge, the Turnstile token is validated against Cloudflare's siteverify API. On success, the user's timestamp and IP are stored in a Durable Object.
+4. **Challenge Status** -- Subsequent requests check the stored timestamp and IP. The challenge is valid for a configurable window (`TIME_TO_CHALLENGE`). Expired or IP-mismatched sessions require re-verification.
+5. **Rate Limiting** -- Each request to a protected path consumes a token from a per-IP token bucket. When tokens are exhausted, a rate limit page with a live countdown timer is served.
+6. **Credential Storage** -- POST requests to the credential store path have their payload encrypted with AES-256-GCM and stored in a separate Durable Object. Data is deleted after a single retrieval and auto-expires via DO alarms.
+7. **Cleanup** -- A daily cron job purges expired Durable Object entries older than 24 hours.
 
-### `ChallengeStatusStorage` Durable Object
+## Use Cases
 
-Responsible for tracking rate limit counters and timestamps for each client IP and `cf_clearance` cookie pair.
+### Protect login endpoints (default)
 
-#### Endpoints
+```jsonc
+"PROTECTED_PATHS": "/login"
+```
 
-- `/getTimestampAndIP`: Retrieves the stored timestamp and IP address.
-- `/storeTimestampAndIP`: Stores or updates the timestamp and IP address.
-- `/deleteTimestampAndIP`: Deletes the stored timestamp and IP address.
-- `/checkRateLimit`: Checks if the client has exceeded the rate limit.
+### Protect against scraping (all routes)
 
-### `CredentialsStorage` Durable Object
+```jsonc
+"PROTECTED_PATHS": "/*"
+```
 
-Manages encrypted storage of sensitive data, such as credentials or verification details.
+Every request to the domain must pass a Turnstile challenge before reaching the origin. This is the interstitial pattern used by manga/pirate sites and similar to Cloudflare's JS Challenge (JSD).
 
-#### Endpoints
+### Protect multiple sections
 
-- `/store`: Encrypts and stores data.
-- `/retrieve`: Decrypts and retrieves stored data, then deletes it from storage.
+```jsonc
+"PROTECTED_PATHS": "/login,/admin,/dashboard"
+```
 
-### Main Worker Script
+## Configuration
 
-Handles incoming requests, directing them to the appropriate Durable Object or function based on the request path.
+All configuration is in `wrangler.jsonc`. Secrets are set via `wrangler secret put`.
 
-#### Functions
+### Environment Variables
 
-- `getCfClearanceValue`: Extracts the `cf_clearance` cookie value from the request.
-- `handleLoginRequest`: Processes login requests, checking rate limits and serving challenges as necessary.
-- `handleGetLogin` and `handlePostLogin`: Handle specific login request methods, verifying challenges or storing login attempts.
-- `handleVerifyRequest`: Processes challenge verification responses.
-- `serveChallengePage`: Serves the challenge page to the client, with logic to respond with JSON for non-browser clients.
-- `serveRateLimitPage`: Informs the client they have exceeded the rate limit, with logic to respond with JSON for non-browser clients.
+| Variable | Default | Description |
+|---|---|---|
+| `PROTECTED_PATHS` | `"/login"` | Comma-separated path prefixes to protect, or `"/*"` for all routes |
+| `CREDENTIAL_STORE_PATH` | `"/api/login"` | Path prefix for POST requests that store encrypted credentials |
+| `VERIFY_PATH` | `"/verify"` | Path for the Turnstile verification callback |
+| `MAX_TOKENS` | `"5"` | Maximum tokens in the rate limit bucket |
+| `REFILL_RATE` | `"5"` | Number of tokens refilled per interval |
+| `REFILL_TIME` | `"60000"` | Refill interval in milliseconds (60s) |
+| `TIME_TO_CHALLENGE` | `"150000"` | Challenge validity window in milliseconds (2.5 min) |
+| `MAX_CREDENTIAL_BODY_SIZE` | `"65536"` | Maximum POST body size in bytes for credential storage (64 KB) |
+| `CREDENTIAL_TTL` | `"300000"` | Credential auto-expiry in milliseconds (5 min) |
 
-## Usage
+### Secrets
 
-1. **Rate Limit Checking**: Upon receiving a request, the system checks if the client has exceeded their rate limit using the `/checkRateLimit` endpoint of the `ChallengeStatusStorage` Durable Object.
-2. **Serving Challenges**: If the rate limit is exceeded, the client is served a challenge page (or JSON message for API clients) to verify themselves.
-3. **Verification and Access**: After successful verification, the client's rate limit counter is reset, allowing them to continue making requests.
+Set via `wrangler secret put`:
 
-## Deployment
+| Secret | Description |
+|---|---|
+| `SITE_KEY` | Cloudflare Turnstile site key |
+| `SECRET_KEY` | Cloudflare Turnstile secret key |
 
-1. Deploy the Durable Objects (`ChallengeStatusStorage` and `CredentialsStorage`) to your Cloudflare Workers environment.
-2. Deploy the main worker script, ensuring it's configured to route requests to the appropriate Durable Object or function based on the URL path.
-3. Configure rate limit settings (max tokens, refill rate, and refill time) as needed for your application's requirements.
+You can use the [Turnstile test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/) during development.
 
-## Security Considerations
+### Route Matching
 
-- Ensure that the challenge mechanism is robust and capable of distinguishing between legitimate users and automated traffic.
-- Regularly rotate the encryption key used by `CredentialsStorage` to secure stored data.
-- Monitor for unusual patterns of traffic or verification attempts that may indicate attempts to bypass the rate limiting system.
+`PROTECTED_PATHS` accepts comma-separated path prefixes. A prefix matches the exact path and any subpaths:
+
+- `"/login"` matches `/login`, `/login/callback`, `/login/reset`
+- `"/admin"` matches `/admin`, `/admin/users`, `/admin/settings`
+- `"/*"` matches every path (full-site protection)
+
+The verify path (`VERIFY_PATH`) is always active regardless of `PROTECTED_PATHS`.
+
+## Project Structure
+
+```
+src/
+  index.ts          Main Worker entry point, Durable Objects, routing
+  types.ts          TypeScript interfaces (Env, DO types, configs)
+  utils.ts          Crypto helpers, cookie/IP parsing, URL sanitization
+  siteverify.ts     Turnstile token verification against Cloudflare API
+  staticpages.ts    HTML/JSON response generators (challenge + rate limit pages)
+test/
+  e2e.test.ts       End-to-end tests (40 tests)
+  env.d.ts          Type declarations for test environment
+wrangler.jsonc      Cloudflare Workers configuration
+tsconfig.json       TypeScript configuration
+vitest.config.ts    Vitest configuration with @cloudflare/vitest-pool-workers
+Misc/               Historical development iterations (kept for reference)
+```
+
+## Durable Objects
+
+### ChallengeStatusStorage
+
+Manages per-client challenge state and rate limiting.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/getTimestampAndIP` | GET | Retrieve stored challenge timestamp and IP |
+| `/storeTimestampAndIP` | GET | Store current timestamp and client IP |
+| `/deleteTimestampAndIP` | POST | Delete stored challenge data |
+| `/checkRateLimit` | POST | Token-bucket rate limit check (keyed by IP) |
+
+### CredentialsStorage
+
+Encrypts and stores login payloads with AES-256-GCM. The encryption key is persisted alongside the ciphertext. Data is deleted after a single retrieval and auto-expires via a Durable Object alarm.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/store` | POST | Encrypt and store credentials (enforces body size limit) |
+| `/retrieve` | GET | Decrypt, return, and delete stored credentials |
+
+## Development
+
+### Prerequisites
+
+- Node.js 18+
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/)
+
+### Setup
+
+```bash
+npm install
+```
+
+### Local Development
+
+```bash
+npm start
+# Starts wrangler dev server
+```
+
+### Type Checking
+
+```bash
+npm run typecheck
+```
+
+### Testing
+
+```bash
+npm test
+# Runs 40 e2e tests via @cloudflare/vitest-pool-workers
+```
+
+Tests cover:
+- Worker routing (protected vs pass-through paths)
+- Turnstile verification endpoint (input validation, error handling)
+- XSS protection (URL sanitization in challenge page)
+- ChallengeStatusStorage DO (store/retrieve/delete timestamp+IP, rate limiting)
+- Rate limit bypass prevention (IP-only keying, cookie rotation resistance)
+- CredentialsStorage DO (encrypt/decrypt roundtrip, single-read deletion, body size limits, JSON validation)
+- Utility functions (hashing, crypto key export/import, cookie parsing)
+- Rate limit page (429 status, HTML countdown, JSON response)
+- Configurable route protection (path parsing, prefix matching, wildcard)
+
+### Deploy
+
+```bash
+npm run deploy
+# Runs wrangler deploy
+```
+
+Before deploying, set your Turnstile secrets:
+
+```bash
+wrangler secret put SITE_KEY
+wrangler secret put SECRET_KEY
+```
+
+## Security
+
+- **Rate limiting is keyed by IP only** -- not by cookie. This prevents attackers from bypassing rate limits by rotating `cf_clearance` cookies.
+- **Turnstile verification includes error handling** -- network failures to the siteverify API return 502 instead of crashing. Invalid tokens, missing fields, and malformed URLs are rejected with appropriate 400-level responses.
+- **URL sanitization** -- The `originalUrl` embedded in the challenge page is sanitized to prevent XSS injection. Only `http`/`https` URLs are allowed, and HTML special characters are escaped.
+- **Credential encryption** -- Login payloads are encrypted with AES-256-GCM using a per-request key. The key is persisted alongside the ciphertext (not returned to the caller). Data is single-read and auto-expires via DO alarms.
+- **Body size limits** -- POST bodies to credential storage are capped at `MAX_CREDENTIAL_BODY_SIZE` (default 64 KB) to prevent abuse.
+- **Dual response format** -- Both challenge and rate limit pages detect the `Accept` header: browsers get styled HTML (with dark mode), API clients get JSON.
+- **Scheduled cleanup** -- A daily cron purges all DO entries older than 24 hours using batched deletes.
 
 ## Limitations
 
-- **Client-side JS**: This is still required if the login endpoint is an API endpoint, form is rendered by JS, therefore no strict HTML forms that can be used/manipulated.
-
----
-
-*README Generated by Phind cause I'm lazy*
+- **Client-side JS required** -- The Turnstile widget and rate limit countdown timer require JavaScript. Non-JS clients receive JSON responses instead.
+- **Single-origin** -- The Worker proxies to a single origin defined by the route pattern. Multi-origin routing would require additional configuration.
+- **DO storage scalability** -- Rate limit state is stored in Durable Objects. Extremely high-traffic scenarios may benefit from additional sharding strategies.
